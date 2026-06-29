@@ -82,28 +82,29 @@ def handle_update(update: dict):
             _send(chat_id, "🦚 <b>Krishna Automation Volume 2</b>\nAdmin control panel active.")
 
         elif cmd == "/status":
+            from gemini_client import get_model_status
             stats = db.get_stats()
             gemini_count = db.get_gemini_count_today()
-            
+
             state_str = "🟢 RUNNING"
             if stats['bot_paused']:
                 state_str = "⏸ PAUSED"
             elif stats['safe_mode']:
                 state_str = "🛡️ SAFE MODE"
-                
-            msg_text = (
+
+            _send(chat_id, (
                 f"📊 <b>Bot Status</b>\n"
                 f"State: {state_str}\n"
                 f"Gemini: {'🟢 ON' if stats['gemini_enabled'] else '⚪ OFF'}\n"
-                f"429 Errors: {stats['consecutive_429s']}\n"
-                f"Circuit Breaker: {'🚨 ACTIVE' if stats['circuit_breaker_active'] else '🟢 OK'}\n"
-                f"Today's Gemini Calls: {gemini_count}/1500\n\n"
+                f"Circuit Breaker: "
+                f"{'🚨 ACTIVE' if stats['circuit_breaker_active'] else '🟢 OK'}\n"
+                f"Total Gemini Today: {gemini_count}\n\n"
                 f"<b>Stats:</b>\n"
                 f"Total Replies: {stats['total_comments_replied']}\n"
                 f"Last 24h: {stats['last_24h_replies']}\n"
                 f"Welcome DMs: {stats['welcome_dms_sent']}"
-            )
-            _send(chat_id, msg_text)
+                f"{get_model_status()}"
+            ))
 
         elif cmd == "/pause":
             db.set_state("bot_paused", "true")
