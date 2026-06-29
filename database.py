@@ -401,3 +401,35 @@ def get_recent_activity(limit: int = 10) -> list:
             LIMIT %s
         """, (limit,))
         return cur.fetchall()
+
+405	
+406	def mark_human_handled(user_id: str):
+407	    """
+408	    यह user अब human handle करेगा।
+409	    Bot इसे कभी DM नहीं करेगा।
+410	    """
+411	    with get_db() as cur:
+412	        cur.execute("""
+413	            INSERT INTO bot_state (key, value)
+414	            VALUES (%s, 'true')
+415	            ON CONFLICT (key) DO UPDATE SET value = 'true'
+416	        """, (f"human_handled_{user_id}",))
+417	
+418	
+419	def is_human_handled(user_id: str) -> bool:
+420	    """क्या यह user human handle कर रहा है?"""
+421	    val = get_state(f"human_handled_{user_id}")
+422	    return val == "true"
+423	
+424	
+425	def unmark_human_handled(user_id: str):
+426	    """
+427	    Telegram से manually remove करो
+428	    अगर फिर से bot को handle करना हो।
+429	    """
+430	    with get_db() as cur:
+431	        cur.execute(
+432	            "DELETE FROM bot_state WHERE key = %s",
+433	            (f"human_handled_{user_id}",)
+434	        )
+435	

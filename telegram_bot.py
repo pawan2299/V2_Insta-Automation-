@@ -189,6 +189,14 @@ def handle_update(update: dict):
                 lines = [f"• {l['action']} at {l['created_at'].strftime('%H:%M:%S')}" for l in logs]
                 _send(chat_id, "📋 <b>Recent Activity:</b>\n" + "\n".join(lines))
 
+        elif cmd == "/unblock_dm":
+            if not args:
+                _send(chat_id, "Usage: <code>/unblock_dm user_id</code>")
+                return
+            user_id = args[0]
+            db.unmark_human_handled(user_id)
+            _send(chat_id, f"✅ Bot will now handle DMs from <code>{user_id}</code> again.")
+
         elif cmd == "/ping":
             ping_msg = (
                 "🏓 <b>Pong</b>\n\n"
@@ -206,7 +214,8 @@ def handle_update(update: dict):
                 "✨ <b>AI:</b> /gemini_on, /gemini_off\n"
                 "🔑 <b>Keywords:</b> /addkeyword, /removekeyword, /keywords\n"
                 "📝 <b>Content:</b> /caption topic\n"
-                "🌙 <b>Schedule:</b> /setsleep start end"
+                "🌙 <b>Schedule:</b> /setsleep start end\n"
+                "🔓 <b>Unblock:</b> /unblock_dm user_id"
             )
             _send(chat_id, help_text)
             

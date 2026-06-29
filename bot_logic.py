@@ -6,6 +6,7 @@ from database import (
     claim_welcome_dm, claim_event,
     is_bot_paused, is_gemini_enabled, is_safe_mode,
     get_keyword_reply, is_active_hours,
+    mark_human_handled, is_human_handled,  # ← add karo
 )
 from gemini_client import (
     generate_reply, can_use_gemini,
@@ -197,6 +198,15 @@ def handle_dm(dm_data: dict):
 
     is_echo = dm_data.get("message", {}).get("is_echo", False)
     if is_echo:
+        # ── अगर हमने reply किया → user को human_handled mark करो
+        sender_id = dm_data.get("recipient", {}).get("id", "")
+        recipient_id = dm_data.get("sender", {}).get("id", "")
+        from config import SETTINGS
+        if recipient_id and recipient_id not in (
+            SETTINGS.own_account_id, SETTINGS.page_id
+        ):
+            mark_human_handled(recipient_id)
+            logger.info(f"Human handled marked: {recipient_id}")
         return
 
     sender_id = dm_data.get("sender", {}).get("id", "")
@@ -217,25 +227,24 @@ def handle_dm(dm_data: dict):
     if recipient_id == sender_id:
         return
 
+    # ── Human handled check ───────────────────────────
+    if is_human_handled(sender_id):
+        logger.info(f"Skipping DM — human handling: {sender_id}")
+        return
+
     use_ai = is_gemini_enabled() and not is_safe_mode()
 
-    # ── Keyword check पहले ────────────────────────────
     reply = get_keyword_reply(message_text)
 
     if reply is None and use_ai:
-        # ── Gemini से पूछो — reply करूँ या नहीं? ────────
         should_reply = _gemini_should_reply_dm(message_text)
-
         if not should_reply:
-            # तुम्हें Telegram पर बताओ
             logger.info(f"DM skipped (needs human): {message_text[:50]}")
             _notify_human_dm(sender_id, message_text)
             return
-
         reply = generate_dm_reply(message_text)
 
     if reply is None:
-        # Simple greeting → hardcoded
         reply = random.choice(GREETING_REPLIES)
 
     success = send_dm(sender_id, reply)
