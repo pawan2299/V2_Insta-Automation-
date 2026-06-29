@@ -34,7 +34,8 @@ class Settings:
     database_url: str
     telegram_bot_token: str
     telegram_chat_id: str
-    public_base_url: str # ✅ New
+    dm_access_token: str
+    public_base_url: str = "production"
     environment: str = "production"
     log_level: str = "INFO"
     port: int = 5000
@@ -62,6 +63,7 @@ def _load() -> Settings:
         database_url=db_url,
         telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=_require("TELEGRAM_CHAT_ID"),
+        dm_access_token=_get("DM_ACCESS_TOKEN", main_token),
         public_base_url=_get("PUBLIC_BASE_URL", "https://krishnav2.onrender.com"),
         environment=_get("APP_ENV", "production"),
         log_level=_get("LOG_LEVEL", "INFO"),

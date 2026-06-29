@@ -74,24 +74,40 @@ def reply_to_comment(comment_id: str, message: str) -> bool:
 
 
 def send_dm(user_id: str, message: str) -> bool:
-    """
-    DM send — Instagram Login API।
-    graph.instagram.com + me/messages + Bearer IGAA
-    """
+    """DM — Instagram Login API + IGAA token。"""
     logger.info("=" * 60)
     logger.info(f"Sending DM via Instagram Login API")
     logger.info(f"Recipient : {user_id}")
     logger.info(f"Message   : {message[:50]}...")
     logger.info("=" * 60)
 
-    return _insta_post(
-        "me/messages",
-        {
-            "recipient": {"id": user_id},
-            "message": {"text": message},
-        },
-        SETTINGS.ig_user_token  # IGAA token
-    )
+    headers = {
+        "Authorization": f"Bearer {SETTINGS.dm_access_token}",
+        "Content-Type": "application/json"
+    }
+    try:
+        resp = requests.post(
+            "https://graph.instagram.com/v25.0/me/messages",
+            headers=headers,
+            json={
+                "recipient": {"id": user_id},
+                "message": {"text": message},
+            },
+            timeout=TIMEOUT
+        )
+        if resp.ok:
+            logger.info(f"DM Success: {resp.status_code}")
+            return True
+
+        logger.error("=" * 80)
+        logger.error(f"DM Failed  : {resp.status_code}")
+        logger.error(f"Response   : {resp.text}")
+        logger.error("=" * 80)
+        return False
+
+    except requests.RequestException:
+        logger.exception("DM request failed")
+        return False
 
 
 def get_media_url(media_id: str) -> str | None:
