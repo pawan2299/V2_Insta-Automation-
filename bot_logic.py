@@ -11,6 +11,7 @@ from gemini_client import (
     generate_reply, can_use_gemini,
     generate_dm_reply, generate_welcome_dm,
     is_spam_or_negative,
+    _gemini_should_reply_dm,
 )
 from instagram_api import reply_to_comment, send_dm, get_media_url
 
@@ -172,14 +173,30 @@ def handle_new_follower(user_id: str, username: str = ""):
     logger.info(f"Welcome DM sent to {username or user_id}")
 
 
+def _notify_human_dm(sender_id: str, message_text: str):
+    """
+    Human attention चाहिए वाले DMs का
+    Telegram पर notification。
+    """
+    try:
+        from telegram_bot import _send
+        from config import SETTINGS
+        _send(
+            SETTINGS.telegram_chat_id,
+            f"📩 <b>DM needs your reply!</b>\n\n"
+            f"From: <code>{sender_id}</code>\n"
+            f"Message: {message_text[:200]}"
+        )
+    except Exception as e:
+        logger.error(f"Notify human DM failed: {e}")
+
+
 def handle_dm(dm_data: dict):
     if is_bot_paused():
         return
 
-    # ── Echo ignore करो ───────────────────────────────
     is_echo = dm_data.get("message", {}).get("is_echo", False)
     if is_echo:
-        logger.debug("Echo message ignored.")
         return
 
     sender_id = dm_data.get("sender", {}).get("id", "")
@@ -190,29 +207,37 @@ def handle_dm(dm_data: dict):
         return
 
     from config import SETTINGS
-    # Double safety + echo detection
     if sender_id in (SETTINGS.own_account_id, SETTINGS.page_id):
-        logger.debug(f"Ignoring DM from own account/page: {sender_id}")
         return
 
-    # Deduplication
     if not claim_event(message_id):
-        logger.debug(f"DM {message_id} already processed, skipping.")
         return
 
     recipient_id = dm_data.get("recipient", {}).get("id", "")
     if recipient_id == sender_id:
         return
 
-    # Safe Mode Check
     use_ai = is_gemini_enabled() and not is_safe_mode()
 
+    # ── Keyword check पहले ────────────────────────────
     reply = get_keyword_reply(message_text)
+
     if reply is None and use_ai:
+        # ── Gemini से पूछो — reply करूँ या नहीं? ────────
+        should_reply = _gemini_should_reply_dm(message_text)
+
+        if not should_reply:
+            # तुम्हें Telegram पर बताओ
+            logger.info(f"DM skipped (needs human): {message_text[:50]}")
+            _notify_human_dm(sender_id, message_text)
+            return
+
         reply = generate_dm_reply(message_text)
+
     if reply is None:
+        # Simple greeting → hardcoded
         reply = random.choice(GREETING_REPLIES)
 
     success = send_dm(sender_id, reply)
     if success:
-        logger.info(f"DM Replied to {sender_id} | Mid: {message_id} | SafeMode: {is_safe_mode()}")
+        logger.info(f"DM replied to {sender_id}")

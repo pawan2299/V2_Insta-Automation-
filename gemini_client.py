@@ -366,6 +366,40 @@ def generate_weekly_insight(stats: dict) -> str | None:
     return _generate(prompt, max_length=500)
 
 
+def _gemini_should_reply_dm(text: str) -> bool:
+    """
+    Gemini decide करेगा — Bot reply करे या human को छोड़े。
+    True = Bot reply करे
+    False = Human को छोड़ो
+    """
+    if not can_use_gemini():
+        return False  # Safe side — human को छोड़ो
+
+    prompt = (
+        "You are a filter for @krishna.verse.ai Instagram DM inbox.\n\n"
+        "Classify this DM into one of two categories:\n\n"
+        "BOT_REPLY = Simple messages that need only a warm spiritual response:\n"
+        "- Greetings (Radhe Radhe, Jai Shri Krishna, Hello, Hi)\n"
+        "- Appreciation (beautiful page, loved your content, blessed)\n"
+        "- Devotional expressions (feeling blessed, Krishna devotee)\n"
+        "- Short emotional messages\n\n"
+        "HUMAN_REPLY = Messages that need the page owner's attention:\n"
+        "- Questions (how, what, when, why, can you, do you)\n"
+        "- Requests (create reels, collab, sponsorship, promotion)\n"
+        "- Business inquiries (price, cost, contact, paid)\n"
+        "- Problems or complaints\n"
+        "- Long detailed messages\n"
+        "- Anything requiring a specific or thoughtful answer\n\n"
+        "Reply with exactly one word: BOT_REPLY or HUMAN_REPLY\n\n"
+        f"DM: {text}"
+    )
+
+    result = _generate(prompt, max_length=20, task_type="dm")
+    decision = (result or "").strip().upper()
+    logger.info(f"DM classification: '{text[:40]}' → {decision}")
+    return decision == "BOT_REPLY"
+
+
 def get_model_status() -> str:
     """Telegram /status के लिए model usage।"""
     lines = ["\n📊 <b>Model Usage Today</b>"]
