@@ -10,7 +10,6 @@ TIMEOUT = 10
 
 
 def _post(endpoint: str, data: dict, token: str) -> bool:
-    """Instagram Graph API POST — clean wrapper."""
     try:
         resp = requests.post(
             f"{BASE}/{endpoint}",
@@ -20,9 +19,16 @@ def _post(endpoint: str, data: dict, token: str) -> bool:
         )
 
         if resp.ok:
+            logger.info(f"Instagram API Success: {resp.status_code}")
             return True
 
-        logger.error("Instagram API error %s: %s", resp.status_code, resp.text)
+        logger.error("=" * 80)
+        logger.error(f"Endpoint : {BASE}/{endpoint}")
+        logger.error(f"Payload  : {data}")
+        logger.error(f"Status   : {resp.status_code}")
+        logger.error(f"Response : {resp.text}")
+        logger.error("=" * 80)
+
         return False
 
     except requests.RequestException:
@@ -36,16 +42,23 @@ def reply_to_comment(comment_id: str, message: str) -> bool:
 
 
 def send_dm(user_id: str, message: str) -> bool:
-    # DMs/Messaging requires Page Access Token
-    logger.info("DM target user_id=%s", user_id)
-    logger.info("DM message=%s", message)
+
+    logger.info("=" * 60)
+    logger.info(f"Sending Instagram DM")
+    logger.info(f"Recipient : {user_id}")
+    logger.info(f"Message   : {message}")
+    logger.info("=" * 60)
 
     return _post(
         f"{SETTINGS.page_id}/messages",
         {
-            "recipient": {"id": user_id},
-            "message": {"text": message},
-            "messaging_type": "RESPONSE",
+            "recipient": {
+                "id": user_id
+            },
+            "message": {
+                "text": message
+            },
+            "messaging_type": "RESPONSE"
         },
         SETTINGS.page_access_token
     )
