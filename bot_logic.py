@@ -176,6 +176,12 @@ def handle_dm(dm_data: dict):
     if is_bot_paused():
         return
 
+    # ── Echo ignore करो ───────────────────────────────
+    is_echo = dm_data.get("message", {}).get("is_echo", False)
+    if is_echo:
+        logger.debug("Echo message ignored.")
+        return
+
     sender_id = dm_data.get("sender", {}).get("id", "")
     message_text = dm_data.get("message", {}).get("text", "")
     message_id = dm_data.get("message", {}).get("mid", "")
