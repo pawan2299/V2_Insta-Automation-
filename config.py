@@ -30,7 +30,7 @@ class Settings:
     app_secret: str
     page_id: str
     own_account_id: str
-    gemini_api_key: str
+    gemini_api_keys: list[str]  # ✅ Changed: now supports multiple keys
     database_url: str
     telegram_bot_token: str
     telegram_chat_id: str
@@ -51,6 +51,25 @@ def _load() -> Settings:
     ig_token = _get("IG_USER_ACCESS_TOKEN", main_token)
     page_token = _get("PAGE_ACCESS_TOKEN", main_token)
 
+    # ── Load Multiple Gemini Keys for Project-Level Quota Pooling ─────────
+    # Supports GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_API_KEY_3, etc.
+    gemini_keys = []
+    for i in range(1, 11):  # Support up to 10 keys
+        if i == 1:
+            key_env = "GEMINI_API_KEY"
+        else:
+            key_env = f"GEMINI_API_KEY_{i}"
+        
+        key = _get(key_env)
+        if key:
+            gemini_keys.append(key)
+    
+    if not gemini_keys:
+        logger.critical("Missing at least one GEMINI_API_KEY")
+        sys.exit(1)
+    
+    logger.info(f"Loaded {len(gemini_keys)} Gemini API key(s)")
+
     return Settings(
         verify_token=_require("VERIFY_TOKEN"),
         access_token=main_token,
@@ -59,7 +78,7 @@ def _load() -> Settings:
         app_secret=_require("APP_SECRET"),
         page_id=_require("PAGE_ID"),
         own_account_id=_get("OWN_ACCOUNT_ID"),
-        gemini_api_key=_require("GEMINI_API_KEY"),
+        gemini_api_keys=gemini_keys,  # ✅ Now a list
         database_url=db_url,
         telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=_require("TELEGRAM_CHAT_ID"),
