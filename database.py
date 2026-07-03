@@ -209,16 +209,6 @@ def mark_replied(comment_id: str):
 
 # ── Follower DM Dedup ──────────────────────────────────
 
-def claim_welcome_dm(user_id: str) -> bool:
-    with get_db() as cur:
-        cur.execute("""
-            INSERT INTO dm_cooldowns (user_id)
-            VALUES (%s)
-            ON CONFLICT (user_id) DO NOTHING
-        """, (user_id,))
-        return cur.rowcount == 1
-
-
 # ── Stats ──────────────────────────────────────────────
 
 def get_stats() -> dict:
@@ -230,28 +220,25 @@ def get_stats() -> dict:
             "WHERE created_at > NOW() - INTERVAL '24 hours'"
         )
         today_replied = cur.fetchone()["c"]
-        cur.execute("SELECT COUNT(*) as c FROM dm_cooldowns")
-        total_dms = cur.fetchone()["c"]
-    
-    cb_until = get_state("circuit_breaker_until")
-    is_cb_active = False
-    if cb_until and cb_until != "0":
-        try:
-            if datetime.now(timezone.utc).timestamp() < float(cb_until):
-                is_cb_active = True
-        except ValueError:
-            pass
-
-    return {
-        "total_comments_replied": total_replied,
-        "last_24h_replies": today_replied,
-        "welcome_dms_sent": total_dms,
-        "bot_paused": is_bot_paused(),
-        "gemini_enabled": is_gemini_enabled(),
-        "safe_mode": is_safe_mode(),
-        "consecutive_429s": int(get_state("consecutive_429s") or 0),
-        "circuit_breaker_active": is_cb_active
-    }
+        
+        cb_until = get_state("circuit_breaker_until")
+        is_cb_active = False
+        if cb_until and cb_until != "0":
+            try:
+                if datetime.now(timezone.utc).timestamp() < float(cb_until):
+                    is_cb_active = True
+            except ValueError:
+                pass
+        return {
+            "total_comments_replied": total_replied,
+            "last_24h_replies": today_replied,
+            "welcome_dms_sent": 0,  # Hardcoded to 0 since the feature is removed
+            "bot_paused": is_bot_paused(),
+            "gemini_enabled": is_gemini_enabled(),
+            "safe_mode": is_safe_mode(),
+            "consecutive_429s": int(get_state("consecutive_429s") or 0),
+            "circuit_breaker_active": is_cb_active
+        }
 
 
 # ── Custom Keywords ────────────────────────────────────

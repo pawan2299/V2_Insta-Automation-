@@ -3,13 +3,13 @@ import logging
 import random
 from database import (
     is_already_replied, mark_replied,
-    claim_welcome_dm, claim_event,
+    claim_event,
     is_bot_paused, is_gemini_enabled, is_safe_mode,
     get_keyword_reply, is_active_hours,
 )
 from gemini_client import (
     generate_reply, can_use_gemini,
-    generate_dm_reply, generate_welcome_dm,
+    generate_dm_reply,
     is_spam_or_negative,
     _gemini_should_reply_dm,
 )
@@ -39,12 +39,7 @@ PRAISE_REPLIES = [
     "Krishna's blessings to you! 💛🙏",
 ]
 
-WELCOME_DM = (
-    "🌸 Radhe Radhe! Thank you so much for following @krishna.verse.ai! 🙏\n\n"
-    "May Lord Krishna's love and blessings always surround you. "
-    "Stay tuned for beautiful devotional content every day! ✨\n\n"
-    "Jai Shri Krishna! 🦚"
-)
+
 
 GREETING_WORDS = {
     "hi", "hello", "hey", "namaste", "radhe", "jai", "hare", "hari", "bol"
@@ -148,29 +143,6 @@ def handle_comment(comment_data: dict):
     if success:
         mark_replied(comment_id)
         logger.info(f"Replied [{reply_type}] to {comment_id} | SafeMode: {is_safe_mode()}")
-
-
-def handle_new_follower(user_id: str, username: str = ""):
-    if is_bot_paused() or not user_id:
-        return
-    from config import SETTINGS
-    if user_id == SETTINGS.own_account_id:
-        return
-
-    if not claim_welcome_dm(user_id):
-        logger.debug(f"Welcome DM already claimed for {user_id}")
-        return
-
-    # Safe Mode Check
-    use_ai = is_gemini_enabled() and not is_safe_mode()
-
-    if username and use_ai:
-        dm_text = generate_welcome_dm(username) or WELCOME_DM
-    else:
-        dm_text = WELCOME_DM
-
-    send_dm(user_id, dm_text)
-    logger.info(f"Welcome DM sent to {username or user_id}")
 
 
 def _notify_human_dm(sender_id: str, message_text: str):

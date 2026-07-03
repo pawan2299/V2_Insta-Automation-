@@ -7,7 +7,7 @@ from flask import Flask, request, jsonify, render_template_string
 from config import SETTINGS
 from database import init_db, is_safe_mode, set_state, get_state
 from security import verify_signature
-from bot_logic import handle_comment, handle_new_follower, handle_dm
+from bot_logic import handle_comment, handle_dm
 from telegram_bot import handle_update, _send, get_webhook_info, register_telegram_webhook
 from instagram_api import check_token_validity
 
@@ -433,11 +433,6 @@ def webhook():
                 value = change.get("value", {})
                 if field == "comments":
                     handle_comment(value)
-                elif field == "follows":
-                    handle_new_follower(
-                        value.get("id", ""),
-                        value.get("username", "")
-                    )
                 elif field == "messages":
                     handle_dm(value)
 

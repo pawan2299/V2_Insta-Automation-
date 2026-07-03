@@ -148,15 +148,7 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
         add_recent_reply(result)
     return result.replace('"', "").replace("'", "") if result else None
 
-def generate_welcome_dm(username: str) -> str | None:
-    if not can_use_gemini(): return None
-    prompt = (
-        f"Write a warm welcome DM (max 40 words) for '{username}' "
-        f"who followed @krishna.verse.ai — devotional Krishna page. "
-        "Personal, spiritual, 2-3 emojis. "
-        "End with Radhe Radhe 🙏. Don't mention AI."
-    )
-    return _generate(prompt, max_length=200, task_type="dm")
+
 
 def generate_dm_reply(message_text: str) -> str | None:
     if not can_use_gemini(): return None
