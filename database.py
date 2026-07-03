@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 _pool: pool.ThreadedConnectionPool | None = None
 _pool_lock = threading.Lock()
 
-
 def init_pool(force: bool = False):
     global _pool
     with _pool_lock:
@@ -25,12 +24,11 @@ def init_pool(force: bool = False):
                 _pool.closeall()
             except Exception:
                 pass
-            _pool = None  # ✅ FIX: Prevent using a closed pool
-        
+            _pool = None
         try:
             _pool = pool.ThreadedConnectionPool(
                 minconn=1,
-                maxconn=8,  # ✅ FIX: Increased from 4 to 8 for webhook spikes
+                maxconn=8,
                 dsn=SETTINGS.database_url,
                 cursor_factory=RealDictCursor,
                 connect_timeout=5,
@@ -46,11 +44,9 @@ def get_db():
     global _pool
     conn = None
     try:
-        # ✅ FIX: Auto-recover if pool is closed or None
         if _pool is None or getattr(_pool, 'closed', False):
             logger.warning("DB pool is closed or None. Reinitializing...")
             init_pool(force=True)
-            
         conn = _pool.getconn()
         try:
             with conn.cursor() as test_cur:
@@ -64,7 +60,6 @@ def get_db():
             conn = None
             init_pool(force=True)
             conn = _pool.getconn()
-            
         with conn.cursor() as cur:
             yield cur
         conn.commit()
@@ -82,104 +77,86 @@ def get_db():
             except Exception:
                 pass
 
-
 def init_db():
     init_pool()
     with get_db() as cur:
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS processed_comments (
-                comment_id TEXT PRIMARY KEY,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            )
+        CREATE TABLE IF NOT EXISTS processed_comments (
+            comment_id TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
         """)
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS dm_cooldowns (
-                user_id TEXT PRIMARY KEY,
-                sent_at TIMESTAMPTZ DEFAULT NOW()
-            )
+        CREATE TABLE IF NOT EXISTS bot_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
         """)
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS bot_state (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
+        CREATE TABLE IF NOT EXISTS processed_events (
+            event_id TEXT PRIMARY KEY,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
         """)
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS processed_events (
-                event_id TEXT PRIMARY KEY,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            )
+        INSERT INTO bot_state (key, value) VALUES
+        ('bot_paused', 'false'),
+        ('gemini_enabled', 'true'),
+        ('safe_mode', 'false'),
+        ('consecutive_429s', '0'),
+        ('circuit_breaker_until', '0')
+        ON CONFLICT DO NOTHING
         """)
         cur.execute("""
-            INSERT INTO bot_state (key, value) VALUES
-                ('bot_paused', 'false'),
-                ('gemini_enabled', 'true'),
-                ('safe_mode', 'false'),
-                ('consecutive_429s', '0'),
-                ('circuit_breaker_until', '0')
-            ON CONFLICT DO NOTHING
+        CREATE INDEX IF NOT EXISTS idx_comments_created
+        ON processed_comments(created_at DESC)
         """)
         cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_comments_created
-            ON processed_comments(created_at DESC)
+        CREATE INDEX IF NOT EXISTS idx_events_created
+        ON processed_events(created_at DESC)
         """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_events_created
-            ON processed_events(created_at DESC)
         init_keywords_table()
-        init_c2dm_table() # 🌟 ADD THIS LINE
+        init_c2dm_table()
         logger.info("DB initialized.")
 
-
 # ── Bot State ──────────────────────────────────────────
-
 def get_state(key: str) -> str:
     with get_db() as cur:
         cur.execute("SELECT value FROM bot_state WHERE key = %s", (key,))
         row = cur.fetchone()
         return row["value"] if row else ""
 
-
 def set_state(key: str, value: str):
     with get_db() as cur:
         cur.execute("""
-            INSERT INTO bot_state (key, value) VALUES (%s, %s)
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        INSERT INTO bot_state (key, value) VALUES (%s, %s)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
         """, (key, value))
-
 
 def is_bot_paused() -> bool:
     return get_state("bot_paused") == "true"
 
-
 def is_gemini_enabled() -> bool:
     return get_state("gemini_enabled") == "true"
-
 
 def is_safe_mode() -> bool:
     return get_state("safe_mode") == "true"
 
-
 # ── Event Deduplication ────────────────────────────────
-
 def claim_event(event_id: str) -> bool:
-    """Atomic check and claim for any webhook event."""
     if not event_id:
         return False
     with get_db() as cur:
         cur.execute("""
-            INSERT INTO processed_events (event_id)
-            VALUES (%s)
-            ON CONFLICT (event_id) DO NOTHING
+        INSERT INTO processed_events (event_id)
+        VALUES (%s)
+        ON CONFLICT (event_id) DO NOTHING
         """, (event_id,))
         return cur.rowcount == 1
 
-
 # ── Comment Dedup ──────────────────────────────────────
-
 _comment_cache: set[str] = set()
 _cache_lock = threading.Lock()
-
 
 def is_already_replied(comment_id: str) -> bool:
     with _cache_lock:
@@ -191,11 +168,10 @@ def is_already_replied(comment_id: str) -> bool:
             (comment_id,)
         )
         found = cur.fetchone() is not None
-    if found:
-        with _cache_lock:
-            _comment_cache.add(comment_id)
-    return found
-
+        if found:
+            with _cache_lock:
+                _comment_cache.add(comment_id)
+        return found
 
 def mark_replied(comment_id: str):
     with _cache_lock:
@@ -207,11 +183,7 @@ def mark_replied(comment_id: str):
             (comment_id,)
         )
 
-
-# ── Follower DM Dedup ──────────────────────────────────
-
 # ── Stats ──────────────────────────────────────────────
-
 def get_stats() -> dict:
     with get_db() as cur:
         cur.execute("SELECT COUNT(*) as c FROM processed_comments")
@@ -233,7 +205,7 @@ def get_stats() -> dict:
         return {
             "total_comments_replied": total_replied,
             "last_24h_replies": today_replied,
-            "welcome_dms_sent": 0,  # Hardcoded to 0 since the feature is removed
+            "welcome_dms_sent": 0,
             "bot_paused": is_bot_paused(),
             "gemini_enabled": is_gemini_enabled(),
             "safe_mode": is_safe_mode(),
@@ -241,28 +213,24 @@ def get_stats() -> dict:
             "circuit_breaker_active": is_cb_active
         }
 
-
 # ── Custom Keywords ────────────────────────────────────
-
 def init_keywords_table():
     with get_db() as cur:
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS custom_keywords (
-                keyword TEXT PRIMARY KEY,
-                reply   TEXT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            )
+        CREATE TABLE IF NOT EXISTS custom_keywords (
+            keyword TEXT PRIMARY KEY,
+            reply   TEXT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
         """)
-
 
 def add_keyword(keyword: str, reply: str):
     with get_db() as cur:
         cur.execute("""
-            INSERT INTO custom_keywords (keyword, reply)
-            VALUES (%s, %s)
-            ON CONFLICT (keyword) DO UPDATE SET reply = EXCLUDED.reply
+        INSERT INTO custom_keywords (keyword, reply)
+        VALUES (%s, %s)
+        ON CONFLICT (keyword) DO UPDATE SET reply = EXCLUDED.reply
         """, (keyword.lower().strip(), reply.strip()))
-
 
 def remove_keyword(keyword: str) -> bool:
     with get_db() as cur:
@@ -272,7 +240,6 @@ def remove_keyword(keyword: str) -> bool:
         )
         return cur.rowcount > 0
 
-
 def list_keywords() -> list[dict]:
     with get_db() as cur:
         cur.execute(
@@ -280,7 +247,6 @@ def list_keywords() -> list[dict]:
             "ORDER BY created_at DESC"
         )
         return cur.fetchall()
-
 
 def get_keyword_reply(text: str) -> str | None:
     lower_text = text.lower()
@@ -291,17 +257,15 @@ def get_keyword_reply(text: str) -> str | None:
                 return row["reply"]
     return None
 
-
 # ── Gemini Call Tracking ───────────────────────────────
-
 def increment_gemini_count() -> int:
     today = str(date.today())
     with get_db() as cur:
         cur.execute("""
-            INSERT INTO bot_state (key, value)
-            VALUES (%s, '1')
-            ON CONFLICT (key) DO UPDATE
-            SET value = (CAST(bot_state.value AS INTEGER) + 1)::TEXT
+        INSERT INTO bot_state (key, value)
+        VALUES (%s, '1')
+        ON CONFLICT (key) DO UPDATE
+        SET value = (CAST(bot_state.value AS INTEGER) + 1)::TEXT
         """, (f"gemini_calls_{today}",))
         cur.execute(
             "SELECT value FROM bot_state WHERE key = %s",
@@ -309,7 +273,6 @@ def increment_gemini_count() -> int:
         )
         row = cur.fetchone()
         return int(row["value"]) if row else 0
-
 
 def get_gemini_count_today() -> int:
     today = str(date.today())
@@ -321,11 +284,9 @@ def get_gemini_count_today() -> int:
         row = cur.fetchone()
         return int(row["value"]) if row else 0
 
-
 def set_model_cooldown(model_id: str, duration_mins: int = 10):
     until = (datetime.now(timezone.utc) + timedelta(minutes=duration_mins)).timestamp()
     set_state(f"cooldown_{model_id}", str(until))
-
 
 def is_model_on_cooldown(model_id: str) -> bool:
     until = get_state(f"cooldown_{model_id}")
@@ -336,63 +297,52 @@ def is_model_on_cooldown(model_id: str) -> bool:
     except ValueError:
         return False
 
-
 def get_recent_replies(limit: int = 10) -> list[str]:
-    """Get text of recent replies to prevent semantic repetition."""
     with get_db() as cur:
         cur.execute("""
-            SELECT value FROM bot_state 
-            WHERE key LIKE 'last_reply_%%' 
-            ORDER BY key DESC LIMIT %s
+        SELECT value FROM bot_state
+        WHERE key LIKE 'last_reply_%%'
+        ORDER BY key DESC LIMIT %s
         """, (limit,))
         return [row["value"] for row in cur.fetchall()]
-
 
 def add_recent_reply(text: str):
     ts = datetime.now(timezone.utc).timestamp()
     set_state(f"last_reply_{ts}", text)
-    # Optional: cleanup old ones periodically or just let them stay
-
 
 # ── Active Hours ───────────────────────────────────────
-
 def is_active_hours() -> bool:
     ist_hour = (
         datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
     ).hour
-
     with get_db() as cur:
         cur.execute("""
-            SELECT key, value FROM bot_state
-            WHERE key IN ('sleep_start', 'sleep_end')
+        SELECT key, value FROM bot_state
+        WHERE key IN ('sleep_start', 'sleep_end')
         """)
         rows = {row["key"]: int(row["value"]) for row in cur.fetchall()}
-
-    sleep_start = rows.get("sleep_start", 1)
-    sleep_end = rows.get("sleep_end", 6)
-
-    if sleep_start <= sleep_end:
-        return not (sleep_start <= ist_hour < sleep_end)
-    else:
-        return not (ist_hour >= sleep_start or ist_hour < sleep_end)
-
+        sleep_start = rows.get("sleep_start", 1)
+        sleep_end = rows.get("sleep_end", 6)
+        if sleep_start <= sleep_end:
+            return not (sleep_start <= ist_hour < sleep_end)
+        else:
+            return not (ist_hour >= sleep_start or ist_hour < sleep_end)
 
 # ── Activity Log ───────────────────────────────────────
-
 def get_recent_activity(limit: int = 10) -> list:
     with get_db() as cur:
         cur.execute("""
-            SELECT
-                'Comment replied' AS action,
-                created_at
-            FROM processed_comments
-            UNION ALL
-            SELECT
-                'Event processed' AS action,
-                created_at
-            FROM processed_events
-            ORDER BY created_at DESC
-            LIMIT %s
+        SELECT
+            'Comment replied' AS action,
+            created_at
+        FROM processed_comments
+        UNION ALL
+        SELECT
+            'Event processed' AS action,
+            created_at
+        FROM processed_events
+        ORDER BY created_at DESC
+        LIMIT %s
         """, (limit,))
         return cur.fetchall()
 
@@ -455,8 +405,10 @@ def set_telegram_state(chat_id: str, state_data: dict):
 def get_telegram_state(chat_id: str) -> dict | None:
     raw = get_state(f"tg_state_{chat_id}")
     if raw:
-        try: return json.loads(raw)
-        except: pass
+        try: 
+            return json.loads(raw)
+        except Exception: 
+            pass
     return None
 
 def clear_telegram_state(chat_id: str):
