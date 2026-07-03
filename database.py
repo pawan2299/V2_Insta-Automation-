@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 import threading
+import json
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta, date
 import psycopg2
@@ -125,9 +126,9 @@ def init_db():
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_events_created
             ON processed_events(created_at DESC)
-        """)
-    init_keywords_table()
-    logger.info("DB initialized.")
+        init_keywords_table()
+        init_c2dm_table() # 🌟 ADD THIS LINE
+        logger.info("DB initialized.")
 
 
 # ── Bot State ──────────────────────────────────────────
@@ -387,11 +388,6 @@ def get_recent_activity(limit: int = 10) -> list:
             FROM processed_comments
             UNION ALL
             SELECT
-                'Welcome DM sent' AS action,
-                sent_at AS created_at
-            FROM dm_cooldowns
-            UNION ALL
-            SELECT
                 'Event processed' AS action,
                 created_at
             FROM processed_events
@@ -399,3 +395,69 @@ def get_recent_activity(limit: int = 10) -> list:
             LIMIT %s
         """, (limit,))
         return cur.fetchall()
+
+# ── Comment-to-DM Automation ────────────────────────────
+def init_c2dm_table():
+    with get_db() as cur:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS comment_to_dm (
+            id SERIAL PRIMARY KEY,
+            keyword TEXT UNIQUE NOT NULL,
+            public_reply TEXT NOT NULL,
+            dm_message TEXT NOT NULL,
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+        """)
+        cur.execute("""
+        INSERT INTO bot_state (key, value) VALUES ('c2dm_enabled', 'true')
+        ON CONFLICT DO NOTHING
+        """)
+
+def is_c2dm_enabled() -> bool:
+    return get_state("c2dm_enabled") == "true"
+
+def toggle_c2dm():
+    current = is_c2dm_enabled()
+    set_state("c2dm_enabled", "false" if current else "true")
+
+def add_c2dm_trigger(keyword: str, public_reply: str, dm_message: str):
+    with get_db() as cur:
+        cur.execute("""
+        INSERT INTO comment_to_dm (keyword, public_reply, dm_message)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (keyword) DO UPDATE 
+        SET public_reply = EXCLUDED.public_reply, dm_message = EXCLUDED.dm_message, is_active = TRUE
+        """, (keyword.lower().strip(), public_reply, dm_message))
+
+def get_c2dm_triggers() -> list[dict]:
+    with get_db() as cur:
+        cur.execute("SELECT * FROM comment_to_dm ORDER BY created_at DESC")
+        return cur.fetchall()
+
+def delete_c2dm_trigger(trigger_id: int):
+    with get_db() as cur:
+        cur.execute("DELETE FROM comment_to_dm WHERE id = %s", (trigger_id,))
+
+def find_c2dm_trigger(text: str) -> dict | None:
+    lower_text = text.lower()
+    with get_db() as cur:
+        cur.execute("SELECT * FROM comment_to_dm WHERE is_active = TRUE")
+        for row in cur.fetchall():
+            if row["keyword"] in lower_text:
+                return row
+    return None
+
+# ── Telegram UI State Machine ───────────────────────────
+def set_telegram_state(chat_id: str, state_data: dict):
+    set_state(f"tg_state_{chat_id}", json.dumps(state_data))
+
+def get_telegram_state(chat_id: str) -> dict | None:
+    raw = get_state(f"tg_state_{chat_id}")
+    if raw:
+        try: return json.loads(raw)
+        except: pass
+    return None
+
+def clear_telegram_state(chat_id: str):
+    set_state(f"tg_state_{chat_id}", "")

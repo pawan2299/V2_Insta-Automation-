@@ -1,11 +1,14 @@
 from __future__ import annotations
 import logging
 import random
+import re # 🌟 ADD THIS
+
 from database import (
     is_already_replied, mark_replied,
     claim_event,
     is_bot_paused, is_gemini_enabled, is_safe_mode,
     get_keyword_reply, is_active_hours,
+    is_c2dm_enabled, find_c2dm_trigger # 🌟 ADD THESE
 )
 from gemini_client import (
     generate_reply, can_use_gemini,
@@ -17,29 +20,29 @@ from instagram_api import reply_to_comment, send_dm, get_media_url
 
 logger = logging.getLogger(__name__)
 
-SHORT_REPLIES = [
-    "Radhe Radhe! 🙏",
-    "Jai Shri Krishna! 🌸",
-    "Hari Bol! ✨",
-    "🙏💛",
-    "Jai Radhe! 🌺",
-    "Shri Krishna ki jai! ✨",
+# 🌸 10 Unified Aesthetic Thank You Messages
+AESTHETIC_REPLIES = [
+    "Thank you so much for your kind words 🌸✨ Please follow us @krishna.verse.ai 🙏🏻❣️ Radhe Radhe! 🪷",
+    "Radhe Radhe! 🙏🏻🙏🏻🙏🏻 Thank you for your beautiful comment 🌺 Please follow @krishna.verse.ai ✨🧡",
+    "Jai Shri Krishna! 🦚✨ Your sweet words made our day 🌼 Please follow @krishna.verse.ai 🙏🏻❣️",
+    "Thank you so much! 🌸🙏🏻 Stay connected with us @krishna.verse.ai 🌻✨ Radhe Radhe! ☘️",
+    "We are so grateful for your love 🪷🧡 Please don't forget to follow @krishna.verse.ai 🙏🏻🌺",
+    "Radhe Radhe! 🙏🏻✨ Thank you for your lovely comment 🌸 Follow @krishna.verse.ai ❣️🌼",
+    "Hare Krishna! 🌺✨ Thank you for your sweet words 🙏🏻 Please follow @krishna.verse.ai 🌻❣️",
+    "Thank you so much! 🌸🙏🏻🙏🏻 Please follow @krishna.verse.ai 🪷✨ Radhe Radhe! 🧡",
+    "Thank you for your comment ☘️🌸 Please follow @krishna.verse.ai to join our family 🙏🏻✨",
+    "Jai Shri Krishna! 🦚🌺 Thank you for your lovely message 🙏🏻 Follow @krishna.verse.ai ❣️🌼"
 ]
 
-GREETING_REPLIES = [
-    "Radhe Radhe! 🙏 Jai Shri Krishna!",
-    "Jai Shri Krishna! 🌸 Hare Krishna!",
-    "Hari Bol! 🙏 Welcome, devotee!",
+# 😍 6 Simple Emoji-Only Replies
+EMOJI_REPLIES = [
+    "🙏🏻🙏🏻🙏🏻 Thank you! Please follow @krishna.verse.ai 🌸✨ Radhe Radhe! ❣️",
+    "Radhe Radhe! 🪷✨ Please follow @krishna.verse.ai 🙏🏻🧡",
+    "😍😍😍 Thank you so much! 🌸 Follow @krishna.verse.ai 🙏🏻🌺",
+    "Jai Shri Krishna! 🦚✨ Please follow @krishna.verse.ai 🌻❣️🙏🏻",
+    "Thank you! 🌼✨ Please follow @krishna.verse.ai 🙏🏻☘️ Radhe Radhe!",
+    "Hare Krishna! 🌺🧡 Follow @krishna.verse.ai 🙏🏻🪷✨"
 ]
-
-PRAISE_REPLIES = [
-    "Thank you so much! 🙏 Radhe Radhe!",
-    "Your love means everything! Jai Shri Krishna! ✨",
-    "Hare Krishna! 🌸 So grateful for you!",
-    "Krishna's blessings to you! 💛🙏",
-]
-
-
 
 GREETING_WORDS = {
     "hi", "hello", "hey", "namaste", "radhe", "jai", "hare", "hari", "bol"
@@ -49,95 +52,88 @@ PRAISE_WORDS = {
     "awesome", "love", "cute", "best", "divine", "blessed", "wonderful",
     "superb", "heart"
 }
-
 SPAM_SIGNALS = {
     "follow", "check", "link", "bio", "giveaway",
     "free", "click", "promo", "dm me", "collab"
 }
 
-
 def _looks_suspicious(text: str) -> bool:
-    """Quick local check — Gemini call से पहले।"""
     lower = text.lower()
-    if any(signal in lower for signal in SPAM_SIGNALS):
-        return True
-    if len(set(text.replace(" ", ""))) < 3:
-        return True
+    if any(signal in lower for signal in SPAM_SIGNALS): return True
+    if len(set(text.replace(" ", ""))) < 3: return True
     return False
 
+def _is_emoji_only(text: str) -> bool:
+    clean = re.sub(r'[\s!.,?@#\-_]', '', text)
+    if not clean: return True 
+    if re.search(r'[a-zA-Z0-9]', clean): return False
+    return True
 
 def _classify(text: str) -> str:
     clean = text.lower().strip()
     words = set(clean.split())
-    if len(clean) <= 5:
-        return "short"
-    if words & GREETING_WORDS and len(clean) < 25:
-        return "greeting"
-    if words & PRAISE_WORDS and len(clean) < 40:
-        return "praise"
-    if len(clean) > 30:
-        return "ai"
+    if _is_emoji_only(text): return "emoji"
+    if len(clean) <= 5: return "short"
+    if words & GREETING_WORDS and len(clean) < 25: return "greeting"
+    if words & PRAISE_WORDS and len(clean) < 40: return "praise"
+    if len(clean) > 30 or "?" in text: return "ai"
     return "short"
 
-
 def handle_comment(comment_data: dict):
-    if is_bot_paused():
-        return
-    if not is_active_hours():
-        logger.debug("Silent hours — skipping comment.")
-        return
+    if is_bot_paused(): return
+    if not is_active_hours(): return
 
     comment_id = comment_data.get("id", "")
     text = comment_data.get("text", "").strip()
     from_id = comment_data.get("from", {}).get("id", "")
-
-    if not comment_id or not text or not from_id:
-        return
-
+    
+    if not comment_id or not text or not from_id: return
     from config import SETTINGS
-    if from_id == SETTINGS.own_account_id:
-        return
+    if from_id == SETTINGS.own_account_id: return
+    if not claim_event(comment_id): return
+    if is_already_replied(comment_id): return
 
-    # Event Claim for Deduplication
-    if not claim_event(comment_id):
-        logger.debug(f"Comment {comment_id} already being processed or finished.")
-        return
+    # 🌟 NEW: Comment-to-DM Interceptor (Highest Priority)
+    if is_c2dm_enabled():
+        trigger = find_c2dm_trigger(text)
+        if trigger:
+            reply_to_comment(comment_id, trigger['public_reply'])
+            send_dm(from_id, trigger['dm_message'])
+            mark_replied(comment_id)
+            logger.info(f"🌸 C2DM Triggered [{trigger['keyword']}] for {comment_id}")
+            return
 
-    if is_already_replied(comment_id):
-        logger.debug(f"Already replied to {comment_id}, skipping.")
-        return
-
-    # Safe Mode Check
     use_ai = is_gemini_enabled() and not is_safe_mode()
-
+    
     if len(text) > 15 and _looks_suspicious(text) and use_ai:
         if is_spam_or_negative(text):
-            logger.info(f"Spam/negative comment ignored: {comment_id}")
             mark_replied(comment_id)
             return
 
     reply = get_keyword_reply(text)
     reply_type = "keyword"
-
+    
     if reply is None:
         comment_type = _classify(text)
         reply_type = comment_type
-
-        if comment_type == "ai" and use_ai:
-            # Fetch visual context if available
+        
+        # 🌟 SIMPLIFIED LOGIC: Short/Greeting/Praise/Emoji -> Unified Aesthetic Pool
+        if comment_type in ("emoji", "short", "greeting", "praise"):
+            if comment_type == "emoji":
+                reply = random.choice(EMOJI_REPLIES)
+            else:
+                reply = random.choice(AESTHETIC_REPLIES)
+                
+        # 🤖 AI LOGIC: Long/Complex/Questions -> AI (AI will auto-translate)
+        elif comment_type == "ai" and use_ai:
             media_id = comment_data.get("media_id")
             image_url = get_media_url(media_id) if media_id else None
-            
-            # Note: We can also pass post_caption here if we had it in comment_data
             reply = generate_reply(text, image_url=image_url)
-
+            
+        # Ultimate Fallback
         if reply is None:
-            if comment_type == "greeting":
-                reply = random.choice(GREETING_REPLIES)
-            elif comment_type == "praise":
-                reply = random.choice(PRAISE_REPLIES)
-            else:
-                reply = random.choice(SHORT_REPLIES)
+            reply = random.choice(AESTHETIC_REPLIES)
+            reply_type = "fallback"
 
     success = reply_to_comment(comment_id, reply)
     if success:
@@ -208,7 +204,7 @@ def handle_dm(dm_data: dict):
 
     if reply is None:
         # Simple greeting → hardcoded
-        reply = random.choice(GREETING_REPLIES)
+        reply = random.choice(AESTHETIC_REPLIES)
 
     success = send_dm(sender_id, reply)
     if success:
