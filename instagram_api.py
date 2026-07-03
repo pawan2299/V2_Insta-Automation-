@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 import requests
+import time  # ✅ Add this line at the top
 from config import SETTINGS
 
 logger = logging.getLogger(__name__)
@@ -174,3 +175,37 @@ def check_token_validity(token_type: str = "ig_user") -> bool:
     except Exception as e:
         logger.error(f"Token check error: {e}")
         return False
+
+
+def get_token_expiry_days(token_type: str = "ig_user") -> int | None:
+    """Returns days until token expires. Returns -1 if never expires, None on error."""
+    token = (
+        SETTINGS.ig_user_token
+        if token_type == "ig_user"
+        else SETTINGS.page_access_token
+    )
+    try:
+        resp = requests.get(
+            "https://graph.facebook.com/debug_token",
+            params={
+                "input_token": token,
+                "access_token": token
+            },
+            timeout=10
+        )
+        if not resp.ok:
+            return None
+            
+        data = resp.json().get("data", {})
+        expires_at = data.get("expires_at", 0)
+        
+        if expires_at == 0:
+            return -1 # Never expires (or extremely long-lived)
+            
+        now = int(time.time())
+        days_left = (expires_at - now) // (24 * 3600)
+        return days_left
+        
+    except Exception as e:
+        logger.error(f"Token expiry check error: {e}")
+        return None

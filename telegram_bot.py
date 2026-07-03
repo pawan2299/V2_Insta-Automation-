@@ -295,6 +295,37 @@ def check_and_send_festival_reminders():
     except Exception as e:
         logger.error(f"Festival check failed: {e}")
 
+def check_and_send_token_expiry_alert():
+    """Runs daily. Sends alert if IG token expires in <= 7 days."""
+    try:
+        ist_today = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date()
+        last_check = db.get_state("last_token_expiry_check")
+        
+        # Prevent checking multiple times a day
+        if last_check == str(ist_today):
+            return 
+            
+        db.set_state("last_token_expiry_check", str(ist_today))
+        
+        from instagram_api import get_token_expiry_days
+        days_left = get_token_expiry_days("ig_user")
+        
+        # If token is expiring in 7 days or less
+        if days_left is not None and days_left != -1 and days_left <= 7:
+            alert_key = f"token_expiry_alert_{ist_today}"
+            if db.get_state(alert_key) != "sent":
+                msg = (
+                    f"🚨 <b>Meta API Token Expiring Soon!</b>\n\n"
+                    f"Your Instagram Token will expire in exactly <b>{days_left} days</b>.\n\n"
+                    f"Please generate a new 60-day Long-Lived Token and update it in your Render Environment Variables to prevent the bot from stopping.\n\n"
+                    f"<i>💡 Tip: Go to Meta Graph API Explorer -> Get Token -> Extend Access Token.</i>"
+                )
+                _send(SETTINGS.telegram_chat_id, msg)
+                db.set_state(alert_key, "sent")
+                
+    except Exception as e:
+        logger.error(f"Token expiry check failed: {e}")
+
 def register_telegram_webhook():
     webhook_url = f"{SETTINGS.public_base_url}/telegram-webhook"
     try:
@@ -312,60 +343,33 @@ def get_webhook_info() -> dict:
 def show_c2dm_main_menu(chat_id: str, msg_id: int = None):
     db.clear_telegram_state(chat_id)
     status = "🟢 Active" if db.is_c2dm_enabled() else "🔴 Paused"
-    text = (
-        "🌸 <b>Comment-to-DM Automation</b> 🦚\n\n"
-        "Turn comments into private blessings.\n\n"
-        f"<b>System Status:</b> {status}"
-    )
-    buttons = [
+    text = f"🌸 <b>Comment-to-DM Setup</b>\n\nStatus: {status}\n\nThis feature automatically replies to specific keywords in comments and sends a direct message to the user."
+    
+    btns = {"inline_keyboard": [
         [{"text": "➕ Add New Trigger", "callback_data": "c2dm_add"}],
-        [{"text": "📋 View / Delete Triggers", "callback_data": "c2dm_list"}],
-        [{"text": f"⚙️ Toggle Feature ({status})", "callback_data": "c2dm_toggle"}],
-        [{"text": "🔙 Back to Menu", "callback_data": "menu_main"}]
-    ]
-    if msg_id: _edit_message(chat_id, msg_id, text, reply_markup={"inline_keyboard": buttons})
-    else: _send(chat_id, text, reply_markup={"inline_keyboard": buttons})
+        [{"text": "📋 List Triggers", "callback_data": "c2dm_list"}],
+        [{"text": ("🔴 Pause Feature" if db.is_c2dm_enabled() else "🟢 Resume Feature"), "callback_data": "c2dm_toggle"}],
+        [{"text": "🔙 Back", "callback_data": "menu_main"}]
+    ]}
+    
+    if msg_id: _edit_message(chat_id, msg_id, text, reply_markup=btns)
+    else: _send(chat_id, text, reply_markup=btns)
 
-def show_c2dm_list(chat_id: str, msg_id: int):
-    triggers = db.get_c2dm_triggers()
+def show_c2dm_list(chat_id: str, msg_id: int = None):
+    triggers = db.list_c2dm_triggers()
+    text = "📋 <b>Active C2DM Triggers:</b>\n\n"
+    
+    btns = []
     if not triggers:
-        text = "📋 <b>Active Triggers</b>\n\n<i>No triggers set up yet.</i>"
-        buttons = [[{"text": "🔙 Back", "callback_data": "c2dm_menu"}]]
-        _edit_message(chat_id, msg_id, text, reply_markup={"inline_keyboard": buttons})
-        return
-
-    text = "📋 <b>Active Triggers</b>\n\n<i>Click a trigger to delete it.</i>\n"
-    buttons = []
-    for t in triggers:
-        kw = t['keyword']
-        pub = t['public_reply'][:20]
-        text += f"\n🔑 <b>{kw}</b>\n  ↳ Public: <i>{pub}...</i>\n"
-        buttons.append([{"text": f"❌ Delete '{kw}'", "callback_data": f"c2dm_del_{t['id']}"}])
-
-    buttons.append([{"text": "🔙 Back", "callback_data": "c2dm_menu"}])
-    _edit_message(chat_id, msg_id, text, reply_markup={"inline_keyboard": buttons})
-
-def handle_c2dm_text_input(chat_id: str, text: str, state: dict):
-    if text.lower() == "/cancel":
-        db.clear_telegram_state(chat_id)
-        _send(chat_id, "❌ Setup cancelled.")
-        show_c2dm_main_menu(chat_id)
-        return
-
-    step = state.get("step", 1)
-    if step == 1:
-        state["keyword"] = text.strip()
-        state["step"] = 2
-        db.set_telegram_state(chat_id, state)
-        _send(chat_id, f"✅ Trigger set to: <b>{text.strip()}</b>\n\n➡️ <b>Step 2/3:</b>\nSend the <b>PUBLIC Reply</b> (what everyone sees under the comment).")
-    elif step == 2:
-        state["public_reply"] = text.strip()
-        state["step"] = 3
-        db.set_telegram_state(chat_id, state)
-        _send(chat_id, "✅ Public reply saved.\n\n➡️ <b>Step 3/3:</b>\nSend the <b>PRIVATE DM Message</b> (what goes to their inbox).\n\n<i>Tip: You can use emojis and line breaks!</i>")
-    elif step == 3:
-        state["dm_message"] = text.strip()
-        db.add_c2dm_trigger(state["keyword"], state["public_reply"], state["dm_message"])
-        db.clear_telegram_state(chat_id)
-        _send(chat_id, f"🎉 <b>Success!</b>\n\nTrigger <b>{state['keyword']}</b> is now live.\nWhen someone comments it, they will get your DM!")
-        show_c2dm_main_menu(chat_id)
+        text += "<i>No triggers set yet.</i>"
+    else:
+        for t in triggers:
+            text += f"• <b>{t['keyword']}</b>\n"
+            text += f"  Reply: {t['public_reply'][:20]}...\n"
+            text += f"  DM: {t['dm_message'][:20]}...\n\n"
+            btns.append([{"text": f"🗑 Delete '{t['keyword']}'", "callback_data": f"c2dm_del_{t['id']}"}])
+            
+    btns.append([{"text": "🔙 Back", "callback_data": "c2dm_menu"}])
+    
+    if msg_id: _edit_message(chat_id, msg_id, text, reply_markup={"inline_keyboard": btns})
+    else: _send(chat_id, text, reply_markup={"inline_keyboard": btns})

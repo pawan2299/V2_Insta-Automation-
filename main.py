@@ -377,7 +377,9 @@ def health():
             </div>
 
             <div class="lotus-divider">🌸 ॐ नमः शान्ति 🌸</div>
-            <div class="footer-text">Krishna Verse AI • Automated with Devotion</div>
+            <div class="footer-text">
+                Designed for @krishna.verse.ai | Serving with Love & Devotion
+            </div>
         </div>
     </body>
     </html>
@@ -419,9 +421,10 @@ def webhook():
     data = request.get_json(silent=True) or {}
 
     def process():
-        # 🌟 NEW: Trigger daily festival check (Runs once a day safely)
-        from telegram_bot import check_and_send_festival_reminders
+        # 🌟 Daily background tasks (Runs once a day safely)
+        from telegram_bot import check_and_send_festival_reminders, check_and_send_token_expiry_alert
         check_and_send_festival_reminders()
+        check_and_send_token_expiry_alert()  # ✅ Added Token Alert
 
         # Global Rate Limit Check
         if not _check_rate_limit() and not is_safe_mode():
