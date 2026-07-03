@@ -75,6 +75,10 @@ def reply_to_comment(comment_id: str, message: str) -> bool:
 
 def send_dm(user_id: str, message: str) -> bool:
     """DM — Instagram Login API + IGAA token。"""
+    
+    # 🛡️ SAFETY SHIELD: Remove '@' to prevent Instagram API truncation bug
+    message = message.replace("@", "") 
+    
     logger.info("=" * 60)
     logger.info(f"Sending DM via Instagram Login API")
     logger.info(f"Recipient : {user_id}")
