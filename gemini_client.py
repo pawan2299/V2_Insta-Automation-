@@ -137,18 +137,37 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
     prompt = (
         "You are @krishna.verse.ai — devotional Krishna Instagram page. "
         "Reply to this comment with warmth and spiritual love. "
-        "SHORT (max 12 words), natural. "
+        "Maximum 25 words, natural and conversational. "
         "End with 'Radhe Radhe 🙏' or 'Jai Shri Krishna ✨'. "
         "Never say you're an AI. "
         "CRITICAL: You MUST reply in the EXACT SAME LANGUAGE as the user's comment. "
-        "(e.g., If they write in Spanish, reply in Spanish. If Bengali, reply in Bengali. If Hindi, reply in Hindi)."
+        "Do NOT use markdown formatting like **bold** or *italics*. Instagram does not support it.\n"
+        "Output ONLY the exact reply text. No prefixes, no quotes.\n"
         f"{history_context}{visual_instr}{context}\n"
         f"Comment: {comment_text}"
     )
-    result = _generate(prompt, max_length=100, task_type="comment", image_url=image_url)
-    if result:
-        add_recent_reply(result)
-    return result.replace('"', "").replace("'", "") if result else None
+    
+    result = _generate(prompt, max_length=150, task_type="comment", image_url=image_url)
+    if not result:
+        return None
+        
+    text = result.strip()
+    
+    # 1. Remove surrounding quotes if AI wrapped the whole sentence in them
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        text = text[1:-1]
+        
+    # 2. Remove markdown asterisks (Instagram doesn't support them)
+    text = text.replace("**", "").replace("*", "")
+    
+    # 3. Take only the first line in case AI added newlines or explanations below
+    text = text.split('\n')[0].strip()
+    
+    # 4. DO NOT remove all apostrophes! Only remove stray double quotes.
+    text = text.replace('"', '')
+    
+    add_recent_reply(text)
+    return text
 
 
 

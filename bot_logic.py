@@ -16,7 +16,7 @@ from gemini_client import (
     is_spam_or_negative,
     _gemini_should_reply_dm,
 )
-from instagram_api import reply_to_comment, send_dm, get_media_url
+from instagram_api import reply_to_comment, send_dm, get_media_details
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +127,14 @@ def handle_comment(comment_data: dict):
         # 🤖 AI LOGIC: Long/Complex/Questions -> AI (AI will auto-translate)
         elif comment_type == "ai" and use_ai:
             media_id = comment_data.get("media_id")
-            image_url = get_media_url(media_id) if media_id else None
-            reply = generate_reply(text, image_url=image_url)
+            # ✅ Fetch caption and filter out Videos/Reels
+            details = get_media_details(media_id) if media_id else {}
+            
+            # Only pass image_url if it's actually an IMAGE (Gemini crashes on MP4s)
+            image_url = details.get("url") if details.get("type") == "IMAGE" else None
+            post_caption = details.get("caption", "")
+            
+            reply = generate_reply(text, post_caption=post_caption, image_url=image_url)
             
         # Ultimate Fallback
         if reply is None:

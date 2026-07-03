@@ -114,24 +114,29 @@ def send_dm(user_id: str, message: str) -> bool:
         return False
 
 
-def get_media_url(media_id: str) -> str | None:
-    """Post का image URL लाओ।"""
+def get_media_details(media_id: str) -> dict:
+    """Fetch Post Image URL, Caption, and Media Type."""
     try:
         resp = requests.get(
             f"{GRAPH_BASE}/{media_id}",
             params={
-                "fields": "media_url,permalink",
+                "fields": "media_url,permalink,caption,media_type",
                 "access_token": SETTINGS.ig_user_token
             },
             timeout=TIMEOUT
         )
         if resp.ok:
-            return resp.json().get("media_url")
-        logger.error(f"Media URL fetch failed {resp.status_code}: {resp.text}")
-        return None
+            data = resp.json()
+            return {
+                "url": data.get("media_url"),
+                "caption": data.get("caption", ""),
+                "type": data.get("media_type", "") # IMAGE, VIDEO, CAROUSEL_ALBUM
+            }
+        logger.error(f"Media fetch failed {resp.status_code}: {resp.text}")
+        return {}
     except Exception as e:
-        logger.error(f"Media URL fetch error: {e}")
-        return None
+        logger.error(f"Media fetch error: {e}")
+        return {}
 
 
 def check_token_validity(token_type: str = "ig_user") -> bool:
