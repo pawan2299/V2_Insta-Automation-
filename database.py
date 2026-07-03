@@ -24,21 +24,32 @@ def init_pool(force: bool = False):
                 _pool.closeall()
             except Exception:
                 pass
-        _pool = pool.ThreadedConnectionPool(
-            minconn=1,
-            maxconn=4,
-            dsn=SETTINGS.database_url,
-            cursor_factory=RealDictCursor,
-            connect_timeout=5,
-        )
-        logger.info("DB pool initialized.")
-
+            _pool = None  # ✅ FIX: Prevent using a closed pool
+        
+        try:
+            _pool = pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=8,  # ✅ FIX: Increased from 4 to 8 for webhook spikes
+                dsn=SETTINGS.database_url,
+                cursor_factory=RealDictCursor,
+                connect_timeout=5,
+            )
+            logger.info("DB pool initialized.")
+        except Exception as e:
+            logger.error(f"Failed to initialize DB pool: {e}")
+            _pool = None
+            raise
 
 @contextmanager
 def get_db():
     global _pool
     conn = None
     try:
+        # ✅ FIX: Auto-recover if pool is closed or None
+        if _pool is None or getattr(_pool, 'closed', False):
+            logger.warning("DB pool is closed or None. Reinitializing...")
+            init_pool(force=True)
+            
         conn = _pool.getconn()
         try:
             with conn.cursor() as test_cur:
@@ -52,7 +63,7 @@ def get_db():
             conn = None
             init_pool(force=True)
             conn = _pool.getconn()
-
+            
         with conn.cursor() as cur:
             yield cur
         conn.commit()

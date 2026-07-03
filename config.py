@@ -45,6 +45,10 @@ def _load() -> Settings:
     db_url = _require("DATABASE_URL")
     if "sslmode" not in db_url:
         db_url += ("&" if "?" in db_url else "?") + "sslmode=require"
+    
+    # ✅ FIX: Add TCP Keepalives to prevent Render from dropping idle connections
+    if "keepalives" not in db_url:
+        db_url += "&keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=6"
 
     # Support for split tokens with backward compatibility
     main_token = _require("ACCESS_TOKEN")
