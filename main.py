@@ -419,6 +419,10 @@ def webhook():
     data = request.get_json(silent=True) or {}
 
     def process():
+        # 🌟 NEW: Trigger daily festival check (Runs once a day safely)
+        from telegram_bot import check_and_send_festival_reminders
+        check_and_send_festival_reminders()
+
         # Global Rate Limit Check
         if not _check_rate_limit() and not is_safe_mode():
             return
