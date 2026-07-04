@@ -216,3 +216,14 @@ def get_model_status() -> str:
         icon = "🟢" if pct < 50 else ("🟡" if pct < 80 else "🔴")
         lines.append(f"{icon} {model['label']}: {used}/{limit}")
     return "\n".join(lines)
+# ... (बाकी code वैसा ही रहने दें) ...
+
+def generate_weekly_insight(stats: dict) -> str | None:
+    if not can_use_gemini(): return None
+    prompt = (
+        "Social media analyst for @krishna.verse.ai.\n"
+        f"This week: {stats.get('total_comments_replied', 0)} replies, "
+        f"{stats.get('welcome_dms_sent', 0)} DMs.\n"
+        "Give 3 practical, aesthetic growth suggestions for a devotional page. Under 100 words."
+    )
+    return _generate(prompt, max_length=500, task_type="dm")
