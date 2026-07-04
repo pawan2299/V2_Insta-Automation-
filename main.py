@@ -1,8 +1,8 @@
 from __future__ import annotations
 import logging
 import sys
-import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify, render_template_string
 from config import SETTINGS
 from database import init_db, is_safe_mode, set_config, get_config, get_stats, get_recent_activity, list_keywords, get_model_rpd
@@ -16,10 +16,13 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 _init_done = False
-_init_lock = threading.Lock()
+_init_lock = threading.Lock() if 'threading' in globals() else __import__('threading').Lock()
+
+# 🌟 FIX 1: ThreadPoolExecutor (Prevents Thread Bomb & OOM Crashes)
+executor = ThreadPoolExecutor(max_workers=10)
 
 _reply_counts = []
-_reply_lock = threading.Lock()
+_reply_lock = __import__('threading').Lock()
 MAX_REPLIES_PER_MINUTE = 20
 
 def _check_rate_limit() -> bool:
@@ -36,6 +39,7 @@ def _check_rate_limit() -> bool:
 
 def _startup():
     global _init_done
+    import threading
     with _init_lock:
         if _init_done: return
         try:
@@ -64,10 +68,8 @@ def health():
         stats = get_stats()
         activity = get_recent_activity(15)
         keywords = list_keywords()
-        
         status_class = "status-paused" if stats.get('bot_paused') else ("status-safe" if stats.get('safe_mode') else "status-live")
         status_text = "⏸ System Paused" if stats.get('bot_paused') else ("🛡 Safe Mode" if stats.get('safe_mode') else "🟢 Live")
-        
         model_html = ""
         total_pool = len(_clients) if _clients else 1
         for m in MODEL_CONFIGS:
@@ -75,12 +77,9 @@ def health():
             limit = m["rpd"] * total_pool
             pct = int((used / limit) * 100) if limit > 0 else 0
             model_html += f'<div style="margin-bottom:1rem"><div style="display:flex;justify-content:space-between"><span>{m["label"]}</span><span>{used}/{limit}</span></div><div class="progress-bar"><div class="progress-fill" style="width:{pct}%"></div></div></div>'
-            
         activity_html = "".join([f"<tr><td>{r['action']}</td><td>{r['created_at'].strftime('%H:%M:%S')}</td></tr>" for r in activity]) or "<tr><td colspan='2'>No activity</td></tr>"
         keywords_html = "".join([f"<tr><td><b>{k['keyword']}</b></td><td>{k['reply'][:30]}...</td></tr>" for k in keywords[:10]]) or "<tr><td colspan='2'>No keywords</td></tr>"
-        
         HTML_TEMPLATE = """<!DOCTYPE html><html><head><title>Krishna Verse AI</title><link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600&family=Inter:wght@300;400;600&display=swap" rel="stylesheet"><style>:root{--bg:#0a0a0c;--card:#141419;--border:#2a2a35;--gold:#d4af37;--saffron:#ff9933;--text:#e0e0e0;--muted:#888899;--success:#4ade80;--danger:#f87171;--warning:#fbbf24}body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;padding:2rem}.container{max-width:1000px;margin:0 auto}h1{font-family:'Cinzel',serif;color:var(--gold);text-align:center}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1.5rem}.card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:1.5rem}.stat-value{font-size:2rem;font-weight:600;color:var(--saffron)}.progress-bar{height:8px;background:#222;border-radius:4px;overflow:hidden}.progress-fill{height:100%;background:linear-gradient(90deg,var(--saffron),var(--gold))}table{width:100%;border-collapse:collapse}th,td{padding:0.5rem;text-align:left;border-bottom:1px solid var(--border)}th{color:var(--gold)}</style></head><body><div class="container"><h1>🦚 Krishna Verse AI</h1><div style="text-align:center;margin:1rem 0"><span style="padding:0.5rem 1.5rem;border-radius:50px;background:rgba(74,222,128,0.1);color:var(--success);border:1px solid var(--success)">{{status_text}}</span></div><div class="grid"><div class="card"><h3>🌸 Stats</h3><div>Total Replies</div><div class="stat-value">{{total_replies}}</div><div>Last 24h</div><div class="stat-value" style="font-size:1.5rem">{{replies_24h}}</div></div><div class="card"><h3>🤖 Health</h3><div>Gemini: {{gemini_status}}</div><div>Circuit Breaker: {{cb_status}}</div></div></div><div class="card" style="margin:1.5rem 0"><h3>✨ Quotas</h3>{{model_html|safe}}</div><div class="grid"><div class="card"><h3>📜 Activity</h3><table><thead><tr><th>Action</th><th>Time</th></tr></thead><tbody>{{activity_html|safe}}</tbody></table></div><div class="card"><h3>🔑 Keywords</h3><table><thead><tr><th>Trigger</th><th>Reply</th></tr></thead><tbody>{{keywords_html|safe}}</tbody></table></div></div></div></body></html>"""
-        
         return render_template_string(HTML_TEMPLATE, status_text=status_text, total_replies=stats['total_comments_replied'], replies_24h=stats['last_24h_replies'], gemini_status="Active" if stats['gemini_enabled'] else "Off", cb_status="Tripped" if stats['circuit_breaker_active'] else "Stable", model_html=model_html, activity_html=activity_html, keywords_html=keywords_html)
     except Exception as e: return f"Error: {e}", 500
 
@@ -103,12 +102,16 @@ def webhook():
             for change in entry.get("changes", []):
                 if change.get("field") == "comments": handle_comment(change.get("value", {}))
                 elif change.get("field") == "follows": handle_new_follower(change.get("value", {}).get("id", ""))
-    threading.Thread(target=process, daemon=True).start()
+                
+    # 🌟 FIX 1: Safe Concurrency
+    executor.submit(process)
     return "OK", 200
 
 @app.post("/telegram-webhook")
 def telegram_webhook():
-    threading.Thread(target=handle_update, args=(request.get_json(silent=True) or {},), daemon=True).start()
+    update = request.get_json(silent=True) or {}
+    # 🌟 FIX 1: Safe Concurrency
+    executor.submit(handle_update, update)
     return "OK", 200
 
 if __name__ == "__main__": app.run(host="0.0.0.0", port=SETTINGS.port, debug=False)
