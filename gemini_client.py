@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 import time
 import json
+import re
 import requests
 from collections import deque
 from google import genai
@@ -29,17 +30,31 @@ def _record_call(model_id: str):
     _model_rpm_calls[model_id].append(time.time())
     increment_gemini_count(model_id)
 
+# 🌟 FIX 4: JSON Markdown Trap Cleaner
+def _clean_json_string(text: str) -> str:
+    text = re.sub(r'^```(?:json)?\s*', '', text.strip(), flags=re.IGNORECASE)
+    text = re.sub(r'\s*```$', '', text.strip())
+    return text.strip()
+
 def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", image_url: str | None = None, response_schema: dict | None = None) -> str | None:
     if task_type in ["spam", "dm_filter", "intent"]: models_to_try = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
     elif task_type == "dm": models_to_try = ["gemini-3.5-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
     else: models_to_try = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
 
     contents = [prompt]
+    
+    # 🌟 FIX 4: Image Memory Spike Protection (Max 4MB)
     if image_url:
         try:
-            img_data = requests.get(image_url, timeout=5).content
-            contents.append(types.Part.from_bytes(data=img_data, mime_type="image/jpeg"))
-        except Exception: pass
+            head_resp = requests.head(image_url, timeout=3, allow_redirects=True)
+            content_length = int(head_resp.headers.get('Content-Length', 0))
+            if 0 < content_length < 4 * 1024 * 1024:
+                img_data = requests.get(image_url, timeout=5).content
+                contents.append(types.Part.from_bytes(data=img_data, mime_type="image/jpeg"))
+            else:
+                logger.warning(f"Image skipped: Size {content_length} bytes (Limit 4MB)")
+        except Exception as e:
+            logger.warning(f"Failed to verify/load image: {e}")
 
     config_kwargs = {"max_output_tokens": max_length}
     if response_schema:
@@ -72,14 +87,12 @@ def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", im
                 else: break 
     return None
 
-# ✅ FIXED: Removed limits and newline-killer for Comments
 def generate_reply(comment_text: str, post_caption: str = "", image_url: str | None = None) -> str | None:
     if not can_use_gemini(): return None
     visual_instr = "\nAnalyze the post image to make your reply specific to the visual content." if image_url else ""
     context = f"\nPost Context: {post_caption[:150]}" if post_caption else ""
     recent = get_recent_replies(5)
     history_context = "\nRecent replies (DO NOT REPEAT THESE): " + " | ".join(recent) if recent else ""
-    
     prompt = (
         "You are @krishna.verse.ai — devotional Krishna Instagram page. "
         "Reply to this comment with warmth and spiritual love. "
@@ -92,30 +105,19 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
         f"{history_context}{visual_instr}{context}\n"
         f"Comment: {comment_text}"
     )
-    
-    # Increased to 500 tokens so the API never force-stops mid-sentence
     result = _generate(prompt, max_length=500, task_type="comment", image_url=image_url)
     if not result: return None
-    
     text = result.strip()
     if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")): text = text[1:-1]
-    
-    # FIX: Replaced .split('\n')[0] with .replace('\n', ' ') so the second half of the message isn't deleted!
     text = text.replace("**", "").replace("*", "").replace('"', '').replace('\n', ' ').replace('\r', '').strip()
-    
-    # Clean up accidental double spaces
-    while "  " in text:
-        text = text.replace("  ", " ")
-        
+    while "  " in text: text = text.replace("  ", " ")
     return text
 
-# ✅ FIXED: Removed strict short limits for DMs to allow full conversation
 def generate_dm_reply(message_text: str, user_id: str) -> str | None:
     if not can_use_gemini(): return None
     history = get_dm_memory(user_id, 5)
     history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in history]) if history else ""
     if history_str: history_str = f"\nPrevious Conversation:\n{history_str}\n"
-
     prompt = (
         "You manage Instagram DMs for @krishna.verse.ai (ultra-realistic AI videos of Little Krishna, Radha, Vrindavan).\n"
         "Your purpose: build a positive devotional community, answer naturally, make it feel warm, respectful, and human.\n"
@@ -135,26 +137,21 @@ def generate_dm_reply(message_text: str, user_id: str) -> str | None:
         f"Follower's new message: {message_text}\n"
         "Your reply:"
     )
-    # Increased to 800 tokens to allow full, complete conversational replies
     return _generate(prompt, max_length=800, task_type="dm")
 
 def generate_welcome_dm(username: str) -> str | None:
     if not can_use_gemini(): return None
-    prompt = (
-        f"Draft a warm, personal welcome DM for '{username}' who followed @krishna.verse.ai.\n"
-        "Make it feel human, NOT an automated broadcast. Max 25 words. No hashtags.\n"
-        "Conclude naturally with 'Radhe Radhe 🙏' or 'Jai Shri Krishna ✨'."
-    )
+    prompt = (f"Draft a warm, personal welcome DM for '{username}' who followed @krishna.verse.ai.\n"
+              "Make it feel human, NOT an automated broadcast. Max 25 words. No hashtags.\n"
+              "Conclude naturally with 'Radhe Radhe 🙏' or 'Jai Shri Krishna ✨'.")
     return _generate(prompt, max_length=200, task_type="dm")
 
 def generate_story_thank_you() -> str | None:
     if not can_use_gemini(): return None
-    prompt = (
-        "A follower just mentioned @krishna.verse.ai in their Instagram Story.\n"
-        "Draft a very short, warm, and aesthetic thank you DM.\n"
-        "Max 25 words. No hashtags. Express genuine gratitude for sharing our content.\n"
-        "Conclude with 'Radhe Radhe 🙏' or 'Jai Shri Krishna ✨'."
-    )
+    prompt = ("A follower just mentioned @krishna.verse.ai in their Instagram Story.\n"
+              "Draft a very short, warm, and aesthetic thank you DM.\n"
+              "Max 25 words. No hashtags. Express genuine gratitude for sharing our content.\n"
+              "Conclude with 'Radhe Radhe 🙏' or 'Jai Shri Krishna ✨'.")
     return _generate(prompt, max_length=200, task_type="dm")
 
 def generate_caption(topic: str) -> str | None:
@@ -164,25 +161,12 @@ def generate_caption(topic: str) -> str | None:
 
 def classify_comment_intent(text: str) -> str:
     if not can_use_gemini(): return "general"
-    prompt = (
-        "Classify the intent of this Instagram comment for a spiritual Krishna page.\n"
-        "Categories:\n"
-        "- EMOJI: Only emojis or symbols.\n"
-        "- GREETING: Simple hi, hello, radhe radhe, namaste, jai shri krishna.\n"
-        "- PRAISE: Compliments, 'beautiful', 'amazing', 'love this', 'cute'.\n"
-        "- QUESTION: Asking something (contains '?' or 'where', 'how', 'who', 'why').\n"
-        "- SPAM: Promo, links, 'dm me', 'collab', 'check bio'.\n"
-        "- GENERAL: Deep thoughts, long sentences, or anything else.\n"
-        f"Comment: {text}"
-    )
-    schema = {
-        "type": "OBJECT",
-        "properties": {"intent": {"type": "STRING", "enum": ["EMOJI", "GREETING", "PRAISE", "QUESTION", "SPAM", "GENERAL"]}},
-        "required": ["intent"]
-    }
+    prompt = ("Classify the intent of this Instagram comment for a spiritual Krishna page.\nCategories:\n- EMOJI\n- GREETING\n- PRAISE\n- QUESTION\n- SPAM\n- GENERAL\n"
+              f"Comment: {text}")
+    schema = {"type": "OBJECT", "properties": {"intent": {"type": "STRING", "enum": ["EMOJI", "GREETING", "PRAISE", "QUESTION", "SPAM", "GENERAL"]}}, "required": ["intent"]}
     result = _generate(prompt, max_length=20, task_type="intent", response_schema=schema)
     if not result: return "general"
-    try: return json.loads(result).get("intent", "GENERAL").lower()
+    try: return json.loads(_clean_json_string(result)).get("intent", "GENERAL").lower()
     except: return "general"
 
 def is_spam_or_negative(text: str) -> bool:
@@ -191,7 +175,7 @@ def is_spam_or_negative(text: str) -> bool:
     schema = {"type": "OBJECT", "properties": {"status": {"type": "STRING", "enum": ["SPAM", "NEGATIVE", "SAFE"]}}, "required": ["status"]}
     result = _generate(prompt, max_length=50, task_type="spam", response_schema=schema)
     if not result: return False
-    try: return json.loads(result).get("status") in ("SPAM", "NEGATIVE")
+    try: return json.loads(_clean_json_string(result)).get("status") in ("SPAM", "NEGATIVE")
     except: return "SPAM" in result.upper() or "NEGATIVE" in result.upper()
 
 def _gemini_should_reply_dm(text: str, user_id: str) -> bool:
@@ -199,28 +183,15 @@ def _gemini_should_reply_dm(text: str, user_id: str) -> bool:
     history = get_dm_memory(user_id, 5)
     history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in history]) if history else ""
     if history_str: history_str = f"\nPrevious Conversation Context:\n{history_str}\n"
-
-    prompt = (
-        "You are an intelligent routing filter for @krishna.verse.ai Instagram DM inbox.\n"
-        "Your job is to decide if the AI should reply, or if the message requires the human Admin's attention.\n\n"
-        "BOT_REPLY (AI handles these):\n"
-        "- Standard greetings, devotion, praise for Krishna or videos.\n"
-        "- Short emotional messages, emojis only.\n"
-        "- Simple questions about Krishna, Vrindavan, or Radha.\n\n"
-        "HUMAN_REPLY (Escalate to Admin immediately):\n"
-        "- Personal opinions, business decisions, collaborations, sponsorships.\n"
-        "- Payment issues, pricing inquiries, purchase requests.\n"
-        "- Complaints, sensitive matters, or personal problems.\n"
-        "- Requests for internal prompts, workflows, or 'how-to' technical details.\n"
-        "- Follow-up questions that require human context from previous chats.\n\n"
-        "CRITICAL RULE: WHEN IN DOUBT, PREFER ESCALATING TO THE ADMIN (HUMAN_REPLY) rather than guessing.\n\n"
-        f"{history_str}"
-        f"New Message: {text}\n"
-    )
+    prompt = ("You are an intelligent routing filter for @krishna.verse.ai Instagram DM inbox.\n"
+              "BOT_REPLY (AI handles): greetings, devotion, praise, short emotions, emojis, simple questions.\n"
+              "HUMAN_REPLY (Escalate): business, collabs, payments, complaints, sensitive matters, prompts requests.\n"
+              "CRITICAL: WHEN IN DOUBT, PREFER HUMAN_REPLY.\n"
+              f"{history_str}New Message: {text}\n")
     schema = {"type": "OBJECT", "properties": {"action": {"type": "STRING", "enum": ["BOT_REPLY", "HUMAN_REPLY"]}}, "required": ["action"]}
     result = _generate(prompt, max_length=50, task_type="dm_filter", response_schema=schema)
     if not result: return False
-    try: return json.loads(result).get("action") == "BOT_REPLY"
+    try: return json.loads(_clean_json_string(result)).get("action") == "BOT_REPLY"
     except: return "BOT_REPLY" in result.upper()
 
 def can_use_gemini() -> bool:
