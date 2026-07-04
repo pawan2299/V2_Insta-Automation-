@@ -6,7 +6,7 @@ from database import (
     is_already_replied, log_reply, claim_event, claim_welcome_dm,
     is_bot_paused, is_gemini_enabled, is_safe_mode, get_config, set_config,
     get_keyword_reply, is_active_hours, is_c2dm_enabled, find_c2dm_trigger,
-    save_dm_memory
+    save_dm_memory, is_in_human_handoff, set_human_handoff # 🌟 NEW IMPORTS
 )
 from gemini_client import (
     generate_reply, can_use_gemini, generate_dm_reply, generate_welcome_dm,
@@ -123,7 +123,7 @@ def _notify_human_dm(sender_id: str, message_text: str):
     try:
         from telegram_bot import _send
         from config import SETTINGS
-        _send(SETTINGS.telegram_chat_id, f"📩 <b>DM Escalated to Admin!</b>\n\nFrom: <code>{sender_id}</code>\nMessage: {message_text[:200]}")
+        _send(SETTINGS.telegram_chat_id, f"📩 <b>DM Escalated to Admin!</b>\n\nFrom: <code>{sender_id}</code>\nMessage: {message_text[:200]}\n\n<i>(Bot locked for this user for 24h)</i>")
     except Exception as e: logger.error(f"Notify human DM failed: {e}")
 
 def handle_dm(dm_data: dict):
@@ -139,6 +139,11 @@ def handle_dm(dm_data: dict):
     if sender_id in (SETTINGS.own_account_id, SETTINGS.page_id): return
     if not claim_event(message_id): return
     
+    # 🛑 NEW: 24-Hour Human Handoff Check (Admin Takeover)
+    if is_in_human_handoff(sender_id):
+        logger.info(f"DM ignored (Human Handoff active) for {sender_id}")
+        return
+
     save_dm_memory(sender_id, "user", message_text)
     
     use_ai = is_gemini_enabled() and not is_safe_mode()
@@ -152,6 +157,10 @@ def handle_dm(dm_data: dict):
             if send_dm(sender_id, ESCALATION_ACK_DM):
                 log_reply(f"ack_{message_id}", sender_id, ESCALATION_ACK_DM, source="dm_ack")
                 save_dm_memory(sender_id, "bot", ESCALATION_ACK_DM)
+                
+                # 🛑 NEW: Lock bot for this user for 24 hours
+                set_human_handoff(sender_id, 24)
+                
             _notify_human_dm(sender_id, message_text)
             return
             
