@@ -401,8 +401,10 @@ def get_recent_activity(limit: int = 10) -> list:
                 ORDER BY created_at DESC LIMIT 50
             ) r
             UNION ALL
-            SELECT 'Welcome DM' AS action, sent_at AS created_at
-            FROM dm_cooldowns ORDER BY sent_at DESC LIMIT 10
+            SELECT action, created_at FROM (
+                SELECT 'Welcome DM' AS action, sent_at AS created_at
+                FROM dm_cooldowns ORDER BY sent_at DESC LIMIT 10
+            ) d
             ORDER BY created_at DESC LIMIT %s
         """, (limit,))
         return cur.fetchall()
