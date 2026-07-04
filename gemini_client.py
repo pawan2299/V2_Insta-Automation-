@@ -4,140 +4,85 @@ import time
 import json
 import requests
 from collections import deque
-from datetime import date
 from google import genai
 from google.genai import types
 from config import SETTINGS
-from database import (
-    increment_gemini_count, get_state, set_state,
-    is_model_on_cooldown, set_model_cooldown,
-    get_recent_replies, add_recent_reply
-)
+from database import get_config, set_config, get_model_rpd, increment_gemini_count, get_recent_replies, save_dm_memory, get_dm_memory
 
 logger = logging.getLogger(__name__)
-
-# ── Multi-Project Client Pool ─────────────────────────
 _clients: list[genai.Client] = []
 
 def _init_clients():
     global _clients
     _clients = [genai.Client(api_key=k) for k in SETTINGS.gemini_api_keys if k]
-    logger.info(f"Initialized {len(_clients)} Gemini Project Clients.")
-
 _init_clients()
 
-# ── 2026 Model Configurations ─────────────────────────
 MODEL_CONFIGS = [
-    {"id": "gemini-3.5-flash", "rpm": 10, "rpd": 1500, "label": "3.5 Flash (Aesthetic Core)"},
+    {"id": "gemini-3.5-flash", "rpm": 10, "rpd": 1500, "label": "3.5 Flash (Core)"},
     {"id": "gemini-3.1-flash-lite", "rpm": 15, "rpd": 1500, "label": "3.1 Lite (Filters)"},
-    {"id": "gemini-2.5-pro", "rpm": 5, "rpd": 50, "label": "2.5 Pro (Deep Logic)"},
+    {"id": "gemini-2.5-pro", "rpm": 5, "rpd": 50, "label": "2.5 Pro (Deep)"},
     {"id": "gemini-2.5-flash", "rpm": 10, "rpd": 1500, "label": "2.5 Flash (Fallback)"},
 ]
-
 _model_rpm_calls: dict[str, deque] = {m["id"]: deque() for m in MODEL_CONFIGS}
-
-def _get_model_rpd_today(model_id: str) -> int:
-    return int(get_state(f"rpd_{model_id}_{date.today()}") or 0)
-
-def _increment_model_rpd(model_id: str) -> int:
-    key = f"rpd_{model_id}_{date.today()}"
-    count = int(get_state(key) or 0) + 1
-    set_state(key, str(count))
-    return count
 
 def _record_call(model_id: str):
     _model_rpm_calls[model_id].append(time.time())
-    rpd_count = _increment_model_rpd(model_id)
-    total = increment_gemini_count()
-    if total % 100 == 0: logger.info(f"Gemini total calls today: {total}")
+    increment_gemini_count(model_id)
 
-# ── Core Generation Engine (Multi-Key + Multi-Model Cascade) ──
-def _generate(
-    prompt: str,
-    max_length: int = 200,
-    task_type: str = "comment",
-    image_url: str | None = None,
-    response_schema: dict | None = None
-) -> str | None:
-    
-    # Dynamic Router Pattern
-    if task_type in ["spam", "dm_filter"]:
-        models_to_try = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
-    elif task_type == "dm":
-        models_to_try = ["gemini-3.5-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
-    else:
-        models_to_try = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
+def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", image_url: str | None = None, response_schema: dict | None = None) -> str | None:
+    if task_type in ["spam", "dm_filter"]: models_to_try = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
+    elif task_type == "dm": models_to_try = ["gemini-3.5-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
+    else: models_to_try = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
 
-    # Build Multimodal Contents
     contents = [prompt]
     if image_url:
         try:
             img_data = requests.get(image_url, timeout=5).content
             contents.append(types.Part.from_bytes(data=img_data, mime_type="image/jpeg"))
-        except Exception as e:
-            logger.warning(f"Failed to load image: {e}")
+        except Exception: pass
 
-    # Build Config (Inject JSON Schema if provided)
     config_kwargs = {"max_output_tokens": max_length}
     if response_schema:
         config_kwargs["response_mime_type"] = "application/json"
         config_kwargs["response_schema"] = response_schema
-        
     config = types.GenerateContentConfig(**config_kwargs)
 
-    # The Cascade Loop: Tries Client 1 -> Models, then Client 2 -> Models
-    for client_idx, client in enumerate(_clients):
+    for client in _clients:
         for model_id in models_to_try:
-            if is_model_on_cooldown(model_id):
-                continue
-                
-            # Local RPM Check
+            until = get_config(f"cooldown_{model_id}")
+            if until and until != "0" and time.time() < float(until): continue
             calls = _model_rpm_calls[model_id]
             now = time.time()
             while calls and now - calls[0] > 60: calls.popleft()
             model_conf = next((m for m in MODEL_CONFIGS if m["id"] == model_id), None)
             if not model_conf or len(calls) >= model_conf["rpm"]: continue
-            
-            # Local RPD Check
-            if _get_model_rpd_today(model_id) >= model_conf["rpd"]: continue
+            if get_model_rpd(model_id) >= model_conf["rpd"]: continue
 
             try:
-                resp = client.models.generate_content(
-                    model=model_id, contents=contents, config=config
-                )
+                resp = client.models.generate_content(model=model_id, contents=contents, config=config)
                 _record_call(model_id)
-                set_state("consecutive_429s", "0")
+                set_config("consecutive_429s", "0")
                 return (resp.text or "").strip()
-                
             except Exception as e:
                 error_msg = str(e)
                 if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                    logger.warning(f"429 on {model_id} (Project {client_idx+1}). Cascading...")
-                    set_model_cooldown(model_id, 5) 
+                    set_config(f"cooldown_{model_id}", str(time.time() + 300))
                     continue
-                elif "400" in error_msg and "SAFETY" in error_msg:
-                    logger.warning(f"Safety block on {model_id}")
-                    return None
-                else:
-                    logger.error(f"Fatal error on {model_id}: {e}")
-                    break 
+                elif "400" in error_msg and "SAFETY" in error_msg: return None
+                else: break 
     return None
-
-# ── Public Functions (Preserved & Updated for New Engine) ──────────────────
 
 def generate_reply(comment_text: str, post_caption: str = "", image_url: str | None = None) -> str | None:
     if not can_use_gemini(): return None
-    
     visual_instr = "\nAnalyze the post image to make your reply specific to the visual content." if image_url else ""
     context = f"\nPost Context: {post_caption[:150]}" if post_caption else ""
-    
     recent = get_recent_replies(5)
     history_context = "\nRecent replies (DO NOT REPEAT THESE): " + " | ".join(recent) if recent else ""
     
     prompt = (
         "You are @krishna.verse.ai — devotional Krishna Instagram page. "
         "Reply to this comment with warmth and spiritual love. "
-        "Maximum 25 words, natural and conversational. "
+        "Keep it short, precise, natural and conversational. "
         "End with 'Radhe Radhe 🙏' or 'Jai Shri Krishna ✨'. "
         "Never say you're an AI. "
         "CRITICAL: You MUST reply in the EXACT SAME LANGUAGE as the user's comment. "
@@ -148,114 +93,100 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
     )
     
     result = _generate(prompt, max_length=150, task_type="comment", image_url=image_url)
-    if not result:
-        return None
-        
+    if not result: return None
     text = result.strip()
-    
-    # 1. Remove surrounding quotes if AI wrapped the whole sentence in them
-    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
-        text = text[1:-1]
-        
-    # 2. Remove markdown asterisks (Instagram doesn't support them)
-    text = text.replace("**", "").replace("*", "")
-    
-    # 3. Take only the first line in case AI added newlines or explanations below
-    text = text.split('\n')[0].strip()
-    
-    # 4. DO NOT remove all apostrophes! Only remove stray double quotes.
-    text = text.replace('"', '')
-    
-    add_recent_reply(text)
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")): text = text[1:-1]
+    text = text.replace("**", "").replace("*", "").replace('"', '').split('\n')[0].strip()
     return text
 
-
-
-def generate_dm_reply(message_text: str) -> str | None:
+def generate_dm_reply(message_text: str, user_id: str) -> str | None:
     if not can_use_gemini(): return None
+    history = get_dm_memory(user_id, 5)
+    history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in history]) if history else ""
+    if history_str: history_str = f"\nPrevious Conversation:\n{history_str}\n"
+
     prompt = (
-        "You are @krishna.verse.ai — devotional Krishna page. "
-        "Someone sent a DM. Reply warmly and spiritually. "
-        "Under 50 words. Natural tone. "
-        "End with Radhe Radhe 🙏 or Jai Shri Krishna ✨. "
-        "Match language (Hindi or English)."
-        f"\nMessage: {message_text}"
+        "You manage Instagram DMs for @krishna.verse.ai (ultra-realistic AI videos of Little Krishna, Radha, Vrindavan).\n"
+        "Your purpose: build a positive devotional community, answer naturally, make it feel warm, respectful, and human.\n"
+        "NEVER sound like a chatbot. NEVER mention AI, prompts, or automation.\n\n"
+        "PERSONALITY: Warm, humble, respectful, friendly, calm, positive, patient. Devotional but not preachy.\n"
+        "LANGUAGE: Automatically reply in the EXACT language used by the follower (Hindi, English, Hinglish).\n"
+        "TONE: Natural, short, precise, context-aware. Like a real person from the KrishnaVerse AI team.\n"
+        "EMOJIS: Use sparingly (max 1-2). Examples: 🙏 ✨ 💙 🌸 😊\n\n"
+        "RULES:\n"
+        "- If they praise Krishna/Videos: Respond warmly with gratitude. Never be arrogant.\n"
+        "- If they ask 'Is this AI?': Answer honestly but gracefully (e.g., 'Haan, ye AI ki madad se banaye jaate hain, par har bhavna soch-samajh kar taiyar ki jaati hai 🙏').\n"
+        "- If they send only emojis: Reply with matching warm emotion.\n"
+        "- If they are sad: Be empathetic. No medical/spiritual guarantees.\n"
+        "- If they insult: Remain calm, never insult back.\n"
+        "- DO NOT pretend to be Lord Krishna or claim divine powers.\n"
+        "- DO NOT write long paragraphs. Keep it short and precise.\n\n"
+        f"{history_str}"
+        f"Follower's new message: {message_text}\n"
+        "Your reply:"
     )
     return _generate(prompt, max_length=300, task_type="dm")
 
-def generate_caption(topic: str) -> str | None:
+def generate_welcome_dm(username: str) -> str | None:
     if not can_use_gemini(): return None
     prompt = (
-        "Write Instagram caption for @krishna.verse.ai — Krishna devotional page.\n"
-        f"Topic: {topic}\n"
-        "3-4 lines, spiritual tone, 5-8 hashtags at end. "
-        "Hindi/English mix okay. "
-        "End with Radhe Radhe 🙏 or Jai Shri Krishna ✨"
+        f"Draft a warm, personal welcome DM for '{username}' who followed @krishna.verse.ai.\n"
+        "Make it feel human, NOT an automated broadcast. Max 20 words. No hashtags.\n"
+        "Conclude naturally with 'Radhe Radhe 🙏' or 'Jai Shri Krishna ✨'."
     )
+    return _generate(prompt, max_length=100, task_type="dm")
+
+def generate_caption(topic: str) -> str | None:
+    if not can_use_gemini(): return None
+    prompt = f"Write Instagram caption for @krishna.verse.ai.\nTopic: {topic}\n3-4 lines, spiritual tone, 5-8 hashtags at end. End with Radhe Radhe 🙏"
     return _generate(prompt, max_length=1000)
 
-def generate_weekly_insight(stats: dict) -> str | None:
-    prompt = (
-        "Social media analyst for @krishna.verse.ai.\n"
-        f"This week: {stats.get('total_comments_replied', 0)} replies, "
-        f"{stats.get('welcome_dms_sent', 0)} welcome DMs.\n"
-        "Give 3 practical growth suggestions. Under 100 words."
-    )
-    return _generate(prompt, max_length=500)
-
-# ── JSON Structured Filters (No more parsing errors) ──
 def is_spam_or_negative(text: str) -> bool:
     if not can_use_gemini(): return False
-    prompt = (
-        "Classify this Instagram comment:\n"
-        "SPAM = promotional, irrelevant, bot-like\n"
-        "NEGATIVE = hate, abuse, offensive\n"
-        "SAFE = genuine, devotional, curious\n"
-        f"Comment: {text}"
-    )
-    schema = {
-        "type": "OBJECT",
-        "properties": {"status": {"type": "STRING", "enum": ["SPAM", "NEGATIVE", "SAFE"]}},
-        "required": ["status"]
-    }
+    prompt = f"Classify comment:\nSPAM=bot/promo\nNEGATIVE=hate\nSAFE=genuine\nComment: {text}"
+    schema = {"type": "OBJECT", "properties": {"status": {"type": "STRING", "enum": ["SPAM", "NEGATIVE", "SAFE"]}}, "required": ["status"]}
     result = _generate(prompt, max_length=50, task_type="spam", response_schema=schema)
     if not result: return False
-    try:
-        data = json.loads(result)
-        return data.get("status") in ("SPAM", "NEGATIVE")
-    except json.JSONDecodeError:
-        return "SPAM" in result.upper() or "NEGATIVE" in result.upper()
+    try: return json.loads(result).get("status") in ("SPAM", "NEGATIVE")
+    except: return "SPAM" in result.upper() or "NEGATIVE" in result.upper()
 
-def _gemini_should_reply_dm(text: str) -> bool:
+def _gemini_should_reply_dm(text: str, user_id: str) -> bool:
     if not can_use_gemini(): return False
+    history = get_dm_memory(user_id, 5)
+    history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in history]) if history else ""
+    if history_str: history_str = f"\nPrevious Conversation Context:\n{history_str}\n"
+
     prompt = (
-        "You are a filter for @krishna.verse.ai Instagram DM inbox.\n"
-        "Classify this DM:\n"
-        "BOT_REPLY = greetings, appreciation, devotional expressions, short emotional messages, emojis only\n"
-        "HUMAN_REPLY = questions, requests, business inquiries, collab, price, complaints, long messages\n"
-        f"DM: {text}"
+        "You are an intelligent routing filter for @krishna.verse.ai Instagram DM inbox.\n"
+        "Your job is to decide if the AI should reply, or if the message requires the human Admin's attention.\n\n"
+        "BOT_REPLY (AI handles these):\n"
+        "- Standard greetings, devotion, praise for Krishna or videos.\n"
+        "- Short emotional messages, emojis only.\n"
+        "- Simple questions about Krishna, Vrindavan, or Radha.\n\n"
+        "HUMAN_REPLY (Escalate to Admin immediately):\n"
+        "- Personal opinions, business decisions, collaborations, sponsorships.\n"
+        "- Payment issues, pricing inquiries, purchase requests.\n"
+        "- Complaints, sensitive matters, or personal problems.\n"
+        "- Requests for internal prompts, workflows, or 'how-to' technical details.\n"
+        "- Follow-up questions that require human context from previous chats.\n\n"
+        "CRITICAL RULE: WHEN IN DOUBT, PREFER ESCALATING TO THE ADMIN (HUMAN_REPLY) rather than guessing.\n\n"
+        f"{history_str}"
+        f"New Message: {text}\n"
     )
-    schema = {
-        "type": "OBJECT",
-        "properties": {"action": {"type": "STRING", "enum": ["BOT_REPLY", "HUMAN_REPLY"]}},
-        "required": ["action"]
-    }
+    schema = {"type": "OBJECT", "properties": {"action": {"type": "STRING", "enum": ["BOT_REPLY", "HUMAN_REPLY"]}}, "required": ["action"]}
     result = _generate(prompt, max_length=50, task_type="dm_filter", response_schema=schema)
     if not result: return False
-    try:
-        data = json.loads(result)
-        return data.get("action") == "BOT_REPLY"
-    except json.JSONDecodeError:
-        return "BOT_REPLY" in result.upper()
+    try: return json.loads(result).get("action") == "BOT_REPLY"
+    except: return "BOT_REPLY" in result.upper()
 
 def can_use_gemini() -> bool:
-    cb_until = get_state("circuit_breaker_until")
+    cb_until = get_config("circuit_breaker_until")
     if cb_until and cb_until != "0":
         try:
             if time.time() < float(cb_until): return False
             else:
-                set_state("circuit_breaker_until", "0")
-                set_state("consecutive_429s", "0")
+                set_config("circuit_breaker_until", "0")
+                set_config("consecutive_429s", "0")
         except ValueError: pass
     return True
 
@@ -264,7 +195,7 @@ def get_model_status() -> str:
     total_pool = len(_clients) if _clients else 1
     for model in MODEL_CONFIGS:
         mid = model["id"]
-        used = _get_model_rpd_today(mid)
+        used = get_model_rpd(mid)
         limit = model["rpd"] * total_pool 
         pct = int(used / limit * 100) if limit > 0 else 0
         icon = "🟢" if pct < 50 else ("🟡" if pct < 80 else "🔴")
