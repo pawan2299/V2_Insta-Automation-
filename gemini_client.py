@@ -19,7 +19,7 @@ _init_clients()
 
 MODEL_CONFIGS = [
     {"id": "gemini-3.5-flash", "rpm": 10, "rpd": 1500, "label": "3.5 Flash (Core)"},
-    {"id": "gemini-3.1-flash-lite", "rpm": 15, "rpd": 1500, "label": "3.1 Lite (Filters)"},
+    {"id": "gemini-3.1-flash-lite", "rpm": 15, "rpd": 1500, "label": "3.1 Lite (Filters/Intent)"},
     {"id": "gemini-2.5-pro", "rpm": 5, "rpd": 50, "label": "2.5 Pro (Deep)"},
     {"id": "gemini-2.5-flash", "rpm": 10, "rpd": 1500, "label": "2.5 Flash (Fallback)"},
 ]
@@ -30,7 +30,8 @@ def _record_call(model_id: str):
     increment_gemini_count(model_id)
 
 def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", image_url: str | None = None, response_schema: dict | None = None) -> str | None:
-    if task_type in ["spam", "dm_filter"]: models_to_try = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
+    # 🌟 PHASE 2: Added "intent" to lightweight router
+    if task_type in ["spam", "dm_filter", "intent"]: models_to_try = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
     elif task_type == "dm": models_to_try = ["gemini-3.5-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
     else: models_to_try = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
 
@@ -136,10 +137,45 @@ def generate_welcome_dm(username: str) -> str | None:
     )
     return _generate(prompt, max_length=100, task_type="dm")
 
+# 🌟 PHASE 3: Story Mention Auto-Reply Generator
+def generate_story_thank_you() -> str | None:
+    if not can_use_gemini(): return None
+    prompt = (
+        "A follower just mentioned @krishna.verse.ai in their Instagram Story.\n"
+        "Draft a very short, warm, and aesthetic thank you DM.\n"
+        "Max 25 words. No hashtags. Express genuine gratitude for sharing our content.\n"
+        "Conclude with 'Radhe Radhe 🙏' or 'Jai Shri Krishna ✨'."
+    )
+    return _generate(prompt, max_length=100, task_type="dm")
+
 def generate_caption(topic: str) -> str | None:
     if not can_use_gemini(): return None
     prompt = f"Write Instagram caption for @krishna.verse.ai.\nTopic: {topic}\n3-4 lines, spiritual tone, 5-8 hashtags at end. End with Radhe Radhe 🙏"
     return _generate(prompt, max_length=1000)
+
+# 🌟 PHASE 2: AI Intent Router (Replaces hardcoded words)
+def classify_comment_intent(text: str) -> str:
+    if not can_use_gemini(): return "general"
+    prompt = (
+        "Classify the intent of this Instagram comment for a spiritual Krishna page.\n"
+        "Categories:\n"
+        "- EMOJI: Only emojis or symbols.\n"
+        "- GREETING: Simple hi, hello, radhe radhe, namaste, jai shri krishna.\n"
+        "- PRAISE: Compliments, 'beautiful', 'amazing', 'love this', 'cute'.\n"
+        "- QUESTION: Asking something (contains '?' or 'where', 'how', 'who', 'why').\n"
+        "- SPAM: Promo, links, 'dm me', 'collab', 'check bio'.\n"
+        "- GENERAL: Deep thoughts, long sentences, or anything else.\n"
+        f"Comment: {text}"
+    )
+    schema = {
+        "type": "OBJECT",
+        "properties": {"intent": {"type": "STRING", "enum": ["EMOJI", "GREETING", "PRAISE", "QUESTION", "SPAM", "GENERAL"]}},
+        "required": ["intent"]
+    }
+    result = _generate(prompt, max_length=20, task_type="intent", response_schema=schema)
+    if not result: return "general"
+    try: return json.loads(result).get("intent", "GENERAL").lower()
+    except: return "general"
 
 def is_spam_or_negative(text: str) -> bool:
     if not can_use_gemini(): return False
