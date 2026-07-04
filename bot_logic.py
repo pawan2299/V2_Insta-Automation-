@@ -6,11 +6,12 @@ from database import (
     is_already_replied, log_reply, claim_event, claim_welcome_dm,
     is_bot_paused, is_gemini_enabled, is_safe_mode, get_config, set_config,
     get_keyword_reply, is_active_hours, is_c2dm_enabled, find_c2dm_trigger,
-    save_dm_memory, is_in_human_handoff, set_human_handoff # 🌟 NEW IMPORTS
+    save_dm_memory, is_in_human_handoff, set_human_handoff
 )
 from gemini_client import (
     generate_reply, can_use_gemini, generate_dm_reply, generate_welcome_dm,
     is_spam_or_negative, _gemini_should_reply_dm,
+    classify_comment_intent, generate_story_thank_you # 🌟 NEW IMPORTS
 )
 from instagram_api import reply_to_comment, send_dm, get_media_details
 
@@ -24,7 +25,6 @@ AESTHETIC_REPLIES = [
 EMOJI_REPLIES = ["🙏🏻🙏🏻🙏🏻 Thank you! Please follow @krishna.verse.ai 🌸✨ Radhe Radhe! ❣️", "Radhe Radhe! 🪷✨ Please follow @krishna.verse.ai 🙏🏻🧡"]
 WELCOME_DM = "🌸 Radhe Radhe! Thank you so much for following @krishna.verse.ai! 🙏\nMay Lord Krishna's love always surround you. ✨\nJai Shri Krishna! 🦚"
 
-# ✅ Auto-Acknowledgment Message for Admin Escalation
 ESCALATION_ACK_DM = (
     "Radhe Radhe 🙏\n\n"
     "Thank you for reaching out! I have forwarded your message to the admin team. "
@@ -32,31 +32,19 @@ ESCALATION_ACK_DM = (
     "Jai Shri Krishna! 🦚"
 )
 
-GREETING_WORDS = {"hi", "hello", "hey", "namaste", "radhe", "jai", "hare", "hari", "bol"}
-PRAISE_WORDS = {"beautiful", "amazing", "lovely", "nice", "good", "great", "wow", "awesome", "love", "cute", "best", "divine", "blessed"}
-SPAM_SIGNALS = {"follow", "check", "link", "bio", "giveaway", "free", "click", "promo", "dm me", "collab"}
-
-def _looks_suspicious(text: str) -> bool:
-    lower = text.lower()
-    if any(signal in lower for signal in SPAM_SIGNALS): return True
-    if len(set(text.replace(" ", ""))) < 3: return True
-    return False
-
+# 🌟 Local fast-filter for pure emojis to save API calls
 def _is_emoji_only(text: str) -> bool:
     clean = re.sub(r'[\s!.,?@#\-_]', '', text)
     if not clean: return True 
     if re.search(r'[a-zA-Z0-9]', clean): return False
     return True
 
-def _classify(text: str) -> str:
-    clean = text.lower().strip()
-    words = set(clean.split())
-    if _is_emoji_only(text): return "emoji"
-    if len(clean) <= 5: return "short"
-    if words & GREETING_WORDS and len(clean) < 25: return "greeting"
-    if words & PRAISE_WORDS and len(clean) < 40: return "praise"
-    if len(clean) > 30 or "?" in text: return "ai"
-    return "short"
+SPAM_SIGNALS = {"follow", "check", "link", "bio", "giveaway", "free", "click", "promo", "dm me", "collab"}
+def _looks_suspicious(text: str) -> bool:
+    lower = text.lower()
+    if any(signal in lower for signal in SPAM_SIGNALS): return True
+    if len(set(text.replace(" ", ""))) < 3: return True
+    return False
 
 def handle_comment(comment_data: dict):
     if is_bot_paused() or not is_active_hours(): return
@@ -80,26 +68,40 @@ def handle_comment(comment_data: dict):
             return
 
     use_ai = is_gemini_enabled() and not is_safe_mode()
-    if len(text) > 15 and _looks_suspicious(text) and use_ai:
-        if is_spam_or_negative(text):
-            log_reply(comment_id, from_id, "[Filtered Spam]", media_id)
-            return
-
-    reply = get_keyword_reply(text)
-    reply_type = "keyword"
     
-    if reply is None:
-        comment_type = _classify(text)
-        reply_type = comment_type
-        if comment_type in ("emoji", "short", "greeting", "praise"):
-            reply = random.choice(EMOJI_REPLIES if comment_type == "emoji" else AESTHETIC_REPLIES)
-        elif comment_type == "ai" and use_ai:
-            details = get_media_details(media_id) if media_id else {}
-            image_url = details.get("url") if details.get("type") == "IMAGE" else None
-            post_caption = details.get("caption", "")
-            reply = generate_reply(text, post_caption=post_caption, image_url=image_url)
+    # 1. Local fast-filter for pure emojis
+    if _is_emoji_only(text):
+        reply = random.choice(EMOJI_REPLIES)
+        reply_type = "emoji"
+    else:
+        # Spam check (Local + AI)
+        if len(text) > 15 and _looks_suspicious(text) and use_ai:
+            if is_spam_or_negative(text):
+                log_reply(comment_id, from_id, "[Filtered Spam]", media_id)
+                return
+                
+        reply = get_keyword_reply(text)
+        reply_type = "keyword"
+        
+        if reply is None and use_ai:
+            # 🌟 PHASE 2: AI Intent Routing (Replaces hardcoded sets)
+            intent = classify_comment_intent(text)
+            reply_type = intent
             
-        if reply is None:
+            if intent == "spam":
+                log_reply(comment_id, from_id, "[AI Filtered Spam]", media_id)
+                return
+            elif intent in ("greeting", "praise"):
+                # Use aesthetic pool for simple intents to save main AI quotas
+                reply = random.choice(AESTHETIC_REPLIES)
+            else:
+                # QUESTION or GENERAL -> Full AI Reply with Context
+                details = get_media_details(media_id) if media_id else {}
+                image_url = details.get("url") if details.get("type") == "IMAGE" else None
+                post_caption = details.get("caption", "")
+                reply = generate_reply(text, post_caption=post_caption, image_url=image_url)
+                
+        elif reply is None:
             reply = random.choice(AESTHETIC_REPLIES)
             reply_type = "fallback"
 
@@ -134,12 +136,25 @@ def handle_dm(dm_data: dict):
     message_text = dm_data.get("message", {}).get("text", "")
     message_id = dm_data.get("message", {}).get("mid", "")
     
-    if not sender_id or not message_text or not message_id: return
+    if not sender_id or not message_id: return
     from config import SETTINGS
     if sender_id in (SETTINGS.own_account_id, SETTINGS.page_id): return
     if not claim_event(message_id): return
     
-    # 🛑 NEW: 24-Hour Human Handoff Check (Admin Takeover)
+    # 🌟 PHASE 3: Story Mention Detection (Intercepts before normal text logic)
+    attachments = dm_data.get("message", {}).get("attachments", [])
+    for att in attachments:
+        if att.get("type") == "story_mention":
+            logger.info(f"Story Mention detected from {sender_id}")
+            story_reply = generate_story_thank_you() or "🌸 Radhe Radhe! Thank you so much for sharing our content on your story! We truly appreciate your love and support. 🙏✨ Jai Shri Krishna! 🦚"
+            if send_dm(sender_id, story_reply):
+                log_reply(message_id, sender_id, story_reply, source="story_mention")
+                save_dm_memory(sender_id, "bot", story_reply)
+            return # Exit early, do not process as normal DM
+
+    if not message_text: return # If no text and no story mention, ignore
+
+    # 🛑 24-Hour Human Handoff Check (Admin Takeover)
     if is_in_human_handoff(sender_id):
         logger.info(f"DM ignored (Human Handoff active) for {sender_id}")
         return
@@ -157,10 +172,7 @@ def handle_dm(dm_data: dict):
             if send_dm(sender_id, ESCALATION_ACK_DM):
                 log_reply(f"ack_{message_id}", sender_id, ESCALATION_ACK_DM, source="dm_ack")
                 save_dm_memory(sender_id, "bot", ESCALATION_ACK_DM)
-                
-                # 🛑 NEW: Lock bot for this user for 24 hours
                 set_human_handoff(sender_id, 24)
-                
             _notify_human_dm(sender_id, message_text)
             return
             
