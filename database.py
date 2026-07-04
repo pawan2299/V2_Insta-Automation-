@@ -10,28 +10,21 @@ from psycopg2.extras import RealDictCursor
 from config import SETTINGS
 
 logger = logging.getLogger(__name__)
-
 _pool: pool.ThreadedConnectionPool | None = None
 _pool_lock = threading.Lock()
 
 def init_pool(force: bool = False):
     global _pool
     with _pool_lock:
-        if _pool and not force:
-            return
+        if _pool and not force: return
         if _pool and force:
-            try:
-                _pool.closeall()
-            except Exception:
-                pass
+            try: _pool.closeall()
+            except Exception: pass
             _pool = None
         try:
             _pool = pool.ThreadedConnectionPool(
-                minconn=1,
-                maxconn=8,
-                dsn=SETTINGS.database_url,
-                cursor_factory=RealDictCursor,
-                connect_timeout=5,
+                minconn=1, maxconn=8, dsn=SETTINGS.database_url,
+                cursor_factory=RealDictCursor, connect_timeout=5,
             )
             logger.info("DB pool initialized.")
         except Exception as e:
@@ -45,207 +38,194 @@ def get_db():
     conn = None
     try:
         if _pool is None or getattr(_pool, 'closed', False):
-            logger.warning("DB pool is closed or None. Reinitializing...")
+            logger.warning("DB pool closed. Reinitializing...")
             init_pool(force=True)
         conn = _pool.getconn()
         try:
-            with conn.cursor() as test_cur:
-                test_cur.execute("SELECT 1")
+            with conn.cursor() as test_cur: test_cur.execute("SELECT 1")
         except Exception:
-            logger.warning("Stale connection detected, recreating pool.")
-            try:
-                _pool.putconn(conn, close=True)
-            except Exception:
-                pass
+            logger.warning("Stale connection, recreating pool.")
+            try: _pool.putconn(conn, close=True)
+            except Exception: pass
             conn = None
             init_pool(force=True)
             conn = _pool.getconn()
-        with conn.cursor() as cur:
-            yield cur
+        with conn.cursor() as cur: yield cur
         conn.commit()
     except Exception:
         if conn:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
+            try: conn.rollback()
+            except Exception: pass
         raise
     finally:
         if conn:
-            try:
-                _pool.putconn(conn)
-            except Exception:
-                pass
+            try: _pool.putconn(conn)
+            except Exception: pass
 
 def init_db():
     init_pool()
     with get_db() as cur:
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS processed_comments (
-            comment_id TEXT PRIMARY KEY,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        )
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS bot_state (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS processed_events (
-            event_id TEXT PRIMARY KEY,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        )
-        """)
-        cur.execute("""
-        INSERT INTO bot_state (key, value) VALUES
-        ('bot_paused', 'false'),
-        ('gemini_enabled', 'true'),
-        ('safe_mode', 'false'),
-        ('consecutive_429s', '0'),
-        ('circuit_breaker_until', '0')
-        ON CONFLICT DO NOTHING
-        """)
-        cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_comments_created
-        ON processed_comments(created_at DESC)
-        """)
-        cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_events_created
-        ON processed_events(created_at DESC)
-        """)
-        init_keywords_table()
-        init_c2dm_table()
-        logger.info("DB initialized.")
+        cur.execute("""CREATE TABLE IF NOT EXISTS system_config (
+            key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS processed_events (
+            event_id TEXT PRIMARY KEY, created_at TIMESTAMPTZ DEFAULT NOW())""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS reply_logs (
+            id SERIAL PRIMARY KEY, event_id TEXT UNIQUE, user_id TEXT, 
+            reply_text TEXT, media_id TEXT, source TEXT DEFAULT 'comment',
+            created_at TIMESTAMPTZ DEFAULT NOW())""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS conversation_memory (
+            id SERIAL PRIMARY KEY, user_id TEXT NOT NULL, role TEXT NOT NULL,
+            message_text TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW())""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS gemini_quotas (
+            model_id TEXT NOT NULL, usage_date DATE NOT NULL, call_count INTEGER DEFAULT 0,
+            PRIMARY KEY (model_id, usage_date))""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS custom_keywords (
+            keyword TEXT PRIMARY KEY, reply TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW())""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS comment_to_dm (
+            id SERIAL PRIMARY KEY, keyword TEXT UNIQUE NOT NULL, public_reply TEXT NOT NULL,
+            dm_message TEXT NOT NULL, is_active BOOLEAN DEFAULT TRUE, created_at TIMESTAMPTZ DEFAULT NOW())""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS dm_cooldowns (
+            user_id TEXT PRIMARY KEY, sent_at TIMESTAMPTZ DEFAULT NOW())""")
 
-# ── Bot State ──────────────────────────────────────────
-def get_state(key: str) -> str:
+        cur.execute("""INSERT INTO system_config (key, value) VALUES
+            ('bot_paused', 'false'), ('gemini_enabled', 'true'), ('safe_mode', 'false'),
+            ('consecutive_429s', '0'), ('circuit_breaker_until', '0'), ('c2dm_enabled', 'true')
+            ON CONFLICT DO NOTHING""")
+        
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reply_logs_created ON reply_logs(created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_conv_mem_user ON conversation_memory(user_id, created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_created ON processed_events(created_at DESC)")
+        logger.info("🚀 Enterprise DB initialized.")
+
+# ── Config & State ──────────────────────────────────────
+def get_config(key: str) -> str:
     with get_db() as cur:
-        cur.execute("SELECT value FROM bot_state WHERE key = %s", (key,))
+        cur.execute("SELECT value FROM system_config WHERE key = %s", (key,))
         row = cur.fetchone()
         return row["value"] if row else ""
 
-def set_state(key: str, value: str):
+def set_config(key: str, value: str):
     with get_db() as cur:
-        cur.execute("""
-        INSERT INTO bot_state (key, value) VALUES (%s, %s)
-        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-        """, (key, value))
+        cur.execute("""INSERT INTO system_config (key, value, updated_at) VALUES (%s, %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()""", (key, value))
 
-def is_bot_paused() -> bool:
-    return get_state("bot_paused") == "true"
+def is_bot_paused() -> bool: return get_config("bot_paused") == "true"
+def is_gemini_enabled() -> bool: return get_config("gemini_enabled") == "true"
+def is_safe_mode() -> bool: return get_config("safe_mode") == "true"
 
-def is_gemini_enabled() -> bool:
-    return get_state("gemini_enabled") == "true"
+def is_circuit_breaker_active() -> bool:
+    cb_until = get_config("circuit_breaker_until")
+    if cb_until and cb_until != "0":
+        try:
+            if datetime.now(timezone.utc).timestamp() < float(cb_until): return True
+        except ValueError: pass
+    return False
 
-def is_safe_mode() -> bool:
-    return get_state("safe_mode") == "true"
-
-# ── Event Deduplication ────────────────────────────────
+# ── Event & Comment Dedup ────────────────────────────────
 def claim_event(event_id: str) -> bool:
-    if not event_id:
-        return False
+    if not event_id: return False
     with get_db() as cur:
-        cur.execute("""
-        INSERT INTO processed_events (event_id)
-        VALUES (%s)
-        ON CONFLICT (event_id) DO NOTHING
-        """, (event_id,))
+        cur.execute("INSERT INTO processed_events (event_id) VALUES (%s) ON CONFLICT DO NOTHING", (event_id,))
         return cur.rowcount == 1
 
-# ── Comment Dedup ──────────────────────────────────────
-_comment_cache: set[str] = set()
-_cache_lock = threading.Lock()
-
-def is_already_replied(comment_id: str) -> bool:
-    with _cache_lock:
-        if comment_id in _comment_cache:
-            return True
+def is_already_replied(event_id: str) -> bool:
     with get_db() as cur:
-        cur.execute(
-            "SELECT 1 FROM processed_comments WHERE comment_id = %s",
-            (comment_id,)
-        )
-        found = cur.fetchone() is not None
-        if found:
-            with _cache_lock:
-                _comment_cache.add(comment_id)
-        return found
+        cur.execute("SELECT 1 FROM reply_logs WHERE event_id = %s", (event_id,))
+        return cur.fetchone() is not None
 
-def mark_replied(comment_id: str):
-    with _cache_lock:
-        _comment_cache.add(comment_id)
+def log_reply(event_id: str, user_id: str, reply_text: str, media_id: str = "", source: str = "comment"):
     with get_db() as cur:
-        cur.execute(
-            "INSERT INTO processed_comments (comment_id) VALUES (%s) "
-            "ON CONFLICT DO NOTHING",
-            (comment_id,)
-        )
+        cur.execute("""INSERT INTO reply_logs (event_id, user_id, reply_text, media_id, source)
+            VALUES (%s, %s, %s, %s, %s) ON CONFLICT (event_id) DO NOTHING""", 
+            (event_id, user_id, reply_text, media_id, source))
 
-# ── Stats ──────────────────────────────────────────────
+def get_recent_replies(limit: int = 5) -> list[str]:
+    with get_db() as cur:
+        cur.execute("SELECT reply_text FROM reply_logs ORDER BY created_at DESC LIMIT %s", (limit,))
+        return [row["reply_text"] for row in cur.fetchall()]
+
+# ── DM Memory (Sliding Window) ───────────────────────────
+def save_dm_memory(user_id: str, role: str, text: str):
+    with get_db() as cur:
+        cur.execute("INSERT INTO conversation_memory (user_id, role, message_text) VALUES (%s, %s, %s)", (user_id, role, text))
+
+def get_dm_memory(user_id: str, limit: int = 5) -> list[dict]:
+    with get_db() as cur:
+        cur.execute("SELECT role, message_text FROM conversation_memory WHERE user_id = %s ORDER BY created_at DESC LIMIT %s", (user_id, limit))
+        return cur.fetchall()[::-1]
+
+# ── Welcome DM Dedup ─────────────────────────────────────
+def claim_welcome_dm(user_id: str) -> bool:
+    with get_db() as cur:
+        cur.execute("INSERT INTO dm_cooldowns (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
+        return cur.rowcount == 1
+
+# ── Gemini Quotas ────────────────────────────────────────
+def increment_gemini_count(model_id: str) -> int:
+    today = date.today()
+    with get_db() as cur:
+        cur.execute("""INSERT INTO gemini_quotas (model_id, usage_date, call_count) VALUES (%s, %s, 1)
+            ON CONFLICT (model_id, usage_date) DO UPDATE SET call_count = gemini_quotas.call_count + 1""", (model_id, today))
+        cur.execute("SELECT call_count FROM gemini_quotas WHERE model_id = %s AND usage_date = %s", (model_id, today))
+        return cur.fetchone()["call_count"]
+
+def get_model_rpd(model_id: str) -> int:
+    with get_db() as cur:
+        cur.execute("SELECT call_count FROM gemini_quotas WHERE model_id = %s AND usage_date = %s", (model_id, date.today()))
+        row = cur.fetchone()
+        return row["call_count"] if row else 0
+
+def get_total_gemini_today() -> int:
+    with get_db() as cur:
+        cur.execute("SELECT SUM(call_count) as total FROM gemini_quotas WHERE usage_date = %s", (date.today(),))
+        row = cur.fetchone()
+        return int(row["total"]) if row["total"] else 0
+
+# ── Stats & Activity ─────────────────────────────────────
 def get_stats() -> dict:
     with get_db() as cur:
-        cur.execute("SELECT COUNT(*) as c FROM processed_comments")
+        cur.execute("SELECT COUNT(*) as c FROM reply_logs WHERE source = 'comment'")
         total_replied = cur.fetchone()["c"]
-        cur.execute(
-            "SELECT COUNT(*) as c FROM processed_comments "
-            "WHERE created_at > NOW() - INTERVAL '24 hours'"
-        )
+        cur.execute("SELECT COUNT(*) as c FROM reply_logs WHERE source = 'comment' AND created_at > NOW() - INTERVAL '24 hours'")
         today_replied = cur.fetchone()["c"]
-        
-        cb_until = get_state("circuit_breaker_until")
-        is_cb_active = False
-        if cb_until and cb_until != "0":
-            try:
-                if datetime.now(timezone.utc).timestamp() < float(cb_until):
-                    is_cb_active = True
-            except ValueError:
-                pass
+        cur.execute("SELECT COUNT(*) as c FROM reply_logs WHERE source IN ('dm', 'dm_ack')")
+        total_dms = cur.fetchone()["c"]
         return {
-            "total_comments_replied": total_replied,
-            "last_24h_replies": today_replied,
-            "welcome_dms_sent": 0,
-            "bot_paused": is_bot_paused(),
-            "gemini_enabled": is_gemini_enabled(),
-            "safe_mode": is_safe_mode(),
-            "consecutive_429s": int(get_state("consecutive_429s") or 0),
-            "circuit_breaker_active": is_cb_active
+            "total_comments_replied": total_replied, "last_24h_replies": today_replied,
+            "welcome_dms_sent": total_dms, "bot_paused": is_bot_paused(),
+            "gemini_enabled": is_gemini_enabled(), "safe_mode": is_safe_mode(),
+            "consecutive_429s": int(get_config("consecutive_429s") or 0),
+            "circuit_breaker_active": is_circuit_breaker_active()
         }
 
-# ── Custom Keywords ────────────────────────────────────
-def init_keywords_table():
+def get_recent_activity(limit: int = 10) -> list:
     with get_db() as cur:
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS custom_keywords (
-            keyword TEXT PRIMARY KEY,
-            reply   TEXT NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        )
-        """)
+        cur.execute("""SELECT source AS action, created_at FROM reply_logs 
+            UNION ALL SELECT 'Welcome DM' AS action, sent_at AS created_at FROM dm_cooldowns
+            ORDER BY created_at DESC LIMIT %s""", (limit,))
+        return cur.fetchall()
 
+# ── Active Hours ─────────────────────────────────────────
+def is_active_hours() -> bool:
+    ist_hour = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).hour
+    start = int(get_config("sleep_start") or 1)
+    end = int(get_config("sleep_end") or 6)
+    if start <= end: return not (start <= ist_hour < end)
+    else: return not (ist_hour >= start or ist_hour < end)
+
+# ── Keywords & C2DM ──────────────────────────────────────
 def add_keyword(keyword: str, reply: str):
     with get_db() as cur:
-        cur.execute("""
-        INSERT INTO custom_keywords (keyword, reply)
-        VALUES (%s, %s)
-        ON CONFLICT (keyword) DO UPDATE SET reply = EXCLUDED.reply
-        """, (keyword.lower().strip(), reply.strip()))
+        cur.execute("INSERT INTO custom_keywords (keyword, reply) VALUES (%s, %s) ON CONFLICT (keyword) DO UPDATE SET reply = EXCLUDED.reply", (keyword.lower().strip(), reply.strip()))
 
 def remove_keyword(keyword: str) -> bool:
     with get_db() as cur:
-        cur.execute(
-            "DELETE FROM custom_keywords WHERE keyword = %s",
-            (keyword.lower().strip(),)
-        )
+        cur.execute("DELETE FROM custom_keywords WHERE keyword = %s", (keyword.lower().strip(),))
         return cur.rowcount > 0
 
 def list_keywords() -> list[dict]:
     with get_db() as cur:
-        cur.execute(
-            "SELECT keyword, reply FROM custom_keywords "
-            "ORDER BY created_at DESC"
-        )
+        cur.execute("SELECT keyword, reply FROM custom_keywords ORDER BY created_at DESC")
         return cur.fetchall()
 
 def get_keyword_reply(text: str) -> str | None:
@@ -253,132 +233,17 @@ def get_keyword_reply(text: str) -> str | None:
     with get_db() as cur:
         cur.execute("SELECT keyword, reply FROM custom_keywords")
         for row in cur.fetchall():
-            if row["keyword"] in lower_text:
-                return row["reply"]
+            if row["keyword"] in lower_text: return row["reply"]
     return None
 
-# ── Gemini Call Tracking ───────────────────────────────
-def increment_gemini_count() -> int:
-    today = str(date.today())
-    with get_db() as cur:
-        cur.execute("""
-        INSERT INTO bot_state (key, value)
-        VALUES (%s, '1')
-        ON CONFLICT (key) DO UPDATE
-        SET value = (CAST(bot_state.value AS INTEGER) + 1)::TEXT
-        """, (f"gemini_calls_{today}",))
-        cur.execute(
-            "SELECT value FROM bot_state WHERE key = %s",
-            (f"gemini_calls_{today}",)
-        )
-        row = cur.fetchone()
-        return int(row["value"]) if row else 0
-
-def get_gemini_count_today() -> int:
-    today = str(date.today())
-    with get_db() as cur:
-        cur.execute(
-            "SELECT value FROM bot_state WHERE key = %s",
-            (f"gemini_calls_{today}",)
-        )
-        row = cur.fetchone()
-        return int(row["value"]) if row else 0
-
-def set_model_cooldown(model_id: str, duration_mins: int = 10):
-    until = (datetime.now(timezone.utc) + timedelta(minutes=duration_mins)).timestamp()
-    set_state(f"cooldown_{model_id}", str(until))
-
-def is_model_on_cooldown(model_id: str) -> bool:
-    until = get_state(f"cooldown_{model_id}")
-    if not until or until == "0":
-        return False
-    try:
-        return datetime.now(timezone.utc).timestamp() < float(until)
-    except ValueError:
-        return False
-
-def get_recent_replies(limit: int = 10) -> list[str]:
-    with get_db() as cur:
-        cur.execute("""
-        SELECT value FROM bot_state
-        WHERE key LIKE 'last_reply_%%'
-        ORDER BY key DESC LIMIT %s
-        """, (limit,))
-        return [row["value"] for row in cur.fetchall()]
-
-def add_recent_reply(text: str):
-    ts = datetime.now(timezone.utc).timestamp()
-    set_state(f"last_reply_{ts}", text)
-
-# ── Active Hours ───────────────────────────────────────
-def is_active_hours() -> bool:
-    ist_hour = (
-        datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-    ).hour
-    with get_db() as cur:
-        cur.execute("""
-        SELECT key, value FROM bot_state
-        WHERE key IN ('sleep_start', 'sleep_end')
-        """)
-        rows = {row["key"]: int(row["value"]) for row in cur.fetchall()}
-        sleep_start = rows.get("sleep_start", 1)
-        sleep_end = rows.get("sleep_end", 6)
-        if sleep_start <= sleep_end:
-            return not (sleep_start <= ist_hour < sleep_end)
-        else:
-            return not (ist_hour >= sleep_start or ist_hour < sleep_end)
-
-# ── Activity Log ───────────────────────────────────────
-def get_recent_activity(limit: int = 10) -> list:
-    with get_db() as cur:
-        cur.execute("""
-        SELECT
-            'Comment replied' AS action,
-            created_at
-        FROM processed_comments
-        UNION ALL
-        SELECT
-            'Event processed' AS action,
-            created_at
-        FROM processed_events
-        ORDER BY created_at DESC
-        LIMIT %s
-        """, (limit,))
-        return cur.fetchall()
-
-# ── Comment-to-DM Automation ────────────────────────────
-def init_c2dm_table():
-    with get_db() as cur:
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS comment_to_dm (
-            id SERIAL PRIMARY KEY,
-            keyword TEXT UNIQUE NOT NULL,
-            public_reply TEXT NOT NULL,
-            dm_message TEXT NOT NULL,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        )
-        """)
-        cur.execute("""
-        INSERT INTO bot_state (key, value) VALUES ('c2dm_enabled', 'true')
-        ON CONFLICT DO NOTHING
-        """)
-
-def is_c2dm_enabled() -> bool:
-    return get_state("c2dm_enabled") == "true"
-
-def toggle_c2dm():
-    current = is_c2dm_enabled()
-    set_state("c2dm_enabled", "false" if current else "true")
+def is_c2dm_enabled() -> bool: return get_config("c2dm_enabled") == "true"
+def toggle_c2dm(): set_config("c2dm_enabled", "false" if is_c2dm_enabled() else "true")
 
 def add_c2dm_trigger(keyword: str, public_reply: str, dm_message: str):
     with get_db() as cur:
-        cur.execute("""
-        INSERT INTO comment_to_dm (keyword, public_reply, dm_message)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (keyword) DO UPDATE 
-        SET public_reply = EXCLUDED.public_reply, dm_message = EXCLUDED.dm_message, is_active = TRUE
-        """, (keyword.lower().strip(), public_reply, dm_message))
+        cur.execute("""INSERT INTO comment_to_dm (keyword, public_reply, dm_message) VALUES (%s, %s, %s)
+            ON CONFLICT (keyword) DO UPDATE SET public_reply = EXCLUDED.public_reply, dm_message = EXCLUDED.dm_message, is_active = TRUE""", 
+            (keyword.lower().strip(), public_reply, dm_message))
 
 def get_c2dm_triggers() -> list[dict]:
     with get_db() as cur:
@@ -386,30 +251,21 @@ def get_c2dm_triggers() -> list[dict]:
         return cur.fetchall()
 
 def delete_c2dm_trigger(trigger_id: int):
-    with get_db() as cur:
-        cur.execute("DELETE FROM comment_to_dm WHERE id = %s", (trigger_id,))
+    with get_db() as cur: cur.execute("DELETE FROM comment_to_dm WHERE id = %s", (trigger_id,))
 
 def find_c2dm_trigger(text: str) -> dict | None:
     lower_text = text.lower()
     with get_db() as cur:
         cur.execute("SELECT * FROM comment_to_dm WHERE is_active = TRUE")
         for row in cur.fetchall():
-            if row["keyword"] in lower_text:
-                return row
+            if row["keyword"] in lower_text: return row
     return None
 
-# ── Telegram UI State Machine ───────────────────────────
-def set_telegram_state(chat_id: str, state_data: dict):
-    set_state(f"tg_state_{chat_id}", json.dumps(state_data))
-
+def set_telegram_state(chat_id: str, state_data: dict): set_config(f"tg_state_{chat_id}", json.dumps(state_data))
 def get_telegram_state(chat_id: str) -> dict | None:
-    raw = get_state(f"tg_state_{chat_id}")
+    raw = get_config(f"tg_state_{chat_id}")
     if raw:
-        try: 
-            return json.loads(raw)
-        except Exception: 
-            pass
+        try: return json.loads(raw)
+        except Exception: pass
     return None
-
-def clear_telegram_state(chat_id: str):
-    set_state(f"tg_state_{chat_id}", "")
+def clear_telegram_state(chat_id: str): set_config(f"tg_state_{chat_id}", "")
