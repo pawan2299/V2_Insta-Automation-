@@ -30,7 +30,6 @@ def _record_call(model_id: str):
     increment_gemini_count(model_id)
 
 def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", image_url: str | None = None, response_schema: dict | None = None) -> str | None:
-    # 🌟 PHASE 2: Added "intent" to lightweight router
     if task_type in ["spam", "dm_filter", "intent"]: models_to_try = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
     elif task_type == "dm": models_to_try = ["gemini-3.5-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
     else: models_to_try = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
@@ -73,6 +72,7 @@ def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", im
                 else: break 
     return None
 
+# ✅ FIXED: Removed limits and newline-killer for Comments
 def generate_reply(comment_text: str, post_caption: str = "", image_url: str | None = None) -> str | None:
     if not can_use_gemini(): return None
     visual_instr = "\nAnalyze the post image to make your reply specific to the visual content." if image_url else ""
@@ -83,7 +83,7 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
     prompt = (
         "You are @krishna.verse.ai — devotional Krishna Instagram page. "
         "Reply to this comment with warmth and spiritual love. "
-        "Keep it short, precise, natural and conversational. "
+        "Write a complete, natural response. Never cut off your sentences mid-way. "
         "End with 'Radhe Radhe 🙏' or 'Jai Shri Krishna ✨'. "
         "Never say you're an AI. "
         "CRITICAL: You MUST reply in the EXACT SAME LANGUAGE as the user's comment. "
@@ -93,13 +93,23 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
         f"Comment: {comment_text}"
     )
     
-    result = _generate(prompt, max_length=150, task_type="comment", image_url=image_url)
+    # Increased to 500 tokens so the API never force-stops mid-sentence
+    result = _generate(prompt, max_length=500, task_type="comment", image_url=image_url)
     if not result: return None
+    
     text = result.strip()
     if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")): text = text[1:-1]
-    text = text.replace("**", "").replace("*", "").replace('"', '').split('\n')[0].strip()
+    
+    # FIX: Replaced .split('\n')[0] with .replace('\n', ' ') so the second half of the message isn't deleted!
+    text = text.replace("**", "").replace("*", "").replace('"', '').replace('\n', ' ').replace('\r', '').strip()
+    
+    # Clean up accidental double spaces
+    while "  " in text:
+        text = text.replace("  ", " ")
+        
     return text
 
+# ✅ FIXED: Removed strict short limits for DMs to allow full conversation
 def generate_dm_reply(message_text: str, user_id: str) -> str | None:
     if not can_use_gemini(): return None
     history = get_dm_memory(user_id, 5)
@@ -112,7 +122,7 @@ def generate_dm_reply(message_text: str, user_id: str) -> str | None:
         "NEVER sound like a chatbot. NEVER mention AI, prompts, or automation.\n\n"
         "PERSONALITY: Warm, humble, respectful, friendly, calm, positive, patient. Devotional but not preachy.\n"
         "LANGUAGE: Automatically reply in the EXACT language used by the follower (Hindi, English, Hinglish).\n"
-        "TONE: Natural, short, precise, context-aware. Like a real person from the KrishnaVerse AI team.\n"
+        "TONE: Natural, context-aware. Like a real person from the KrishnaVerse AI team. Write complete thoughts, never cut off mid-sentence.\n"
         "EMOJIS: Use sparingly (max 1-2). Examples: 🙏 ✨ 💙 🌸 😊\n\n"
         "RULES:\n"
         "- If they praise Krishna/Videos: Respond warmly with gratitude. Never be arrogant.\n"
@@ -120,24 +130,23 @@ def generate_dm_reply(message_text: str, user_id: str) -> str | None:
         "- If they send only emojis: Reply with matching warm emotion.\n"
         "- If they are sad: Be empathetic. No medical/spiritual guarantees.\n"
         "- If they insult: Remain calm, never insult back.\n"
-        "- DO NOT pretend to be Lord Krishna or claim divine powers.\n"
-        "- DO NOT write long paragraphs. Keep it short and precise.\n\n"
+        "- DO NOT pretend to be Lord Krishna or claim divine powers.\n\n"
         f"{history_str}"
         f"Follower's new message: {message_text}\n"
         "Your reply:"
     )
-    return _generate(prompt, max_length=300, task_type="dm")
+    # Increased to 800 tokens to allow full, complete conversational replies
+    return _generate(prompt, max_length=800, task_type="dm")
 
 def generate_welcome_dm(username: str) -> str | None:
     if not can_use_gemini(): return None
     prompt = (
         f"Draft a warm, personal welcome DM for '{username}' who followed @krishna.verse.ai.\n"
-        "Make it feel human, NOT an automated broadcast. Max 20 words. No hashtags.\n"
+        "Make it feel human, NOT an automated broadcast. Max 25 words. No hashtags.\n"
         "Conclude naturally with 'Radhe Radhe 🙏' or 'Jai Shri Krishna ✨'."
     )
-    return _generate(prompt, max_length=100, task_type="dm")
+    return _generate(prompt, max_length=200, task_type="dm")
 
-# 🌟 PHASE 3: Story Mention Auto-Reply Generator
 def generate_story_thank_you() -> str | None:
     if not can_use_gemini(): return None
     prompt = (
@@ -146,14 +155,13 @@ def generate_story_thank_you() -> str | None:
         "Max 25 words. No hashtags. Express genuine gratitude for sharing our content.\n"
         "Conclude with 'Radhe Radhe 🙏' or 'Jai Shri Krishna ✨'."
     )
-    return _generate(prompt, max_length=100, task_type="dm")
+    return _generate(prompt, max_length=200, task_type="dm")
 
 def generate_caption(topic: str) -> str | None:
     if not can_use_gemini(): return None
     prompt = f"Write Instagram caption for @krishna.verse.ai.\nTopic: {topic}\n3-4 lines, spiritual tone, 5-8 hashtags at end. End with Radhe Radhe 🙏"
     return _generate(prompt, max_length=1000)
 
-# 🌟 PHASE 2: AI Intent Router (Replaces hardcoded words)
 def classify_comment_intent(text: str) -> str:
     if not can_use_gemini(): return "general"
     prompt = (
