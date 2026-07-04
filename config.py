@@ -27,7 +27,7 @@ class Settings:
     app_secret: str
     page_id: str
     own_account_id: str
-    gemini_api_keys: list[str]  # ✅ Now supports multiple keys
+    gemini_api_keys: list[str]
     database_url: str
     telegram_bot_token: str
     telegram_chat_id: str
@@ -42,6 +42,7 @@ def _load() -> Settings:
     if "sslmode" not in db_url:
         db_url += ("&" if "?" in db_url else "?") + "sslmode=require"
     
+    # ✅ Keepalives for Render Postgres
     if "keepalives" not in db_url:
         db_url += "&keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=6"
 
@@ -49,9 +50,8 @@ def _load() -> Settings:
     ig_token = _get("IG_USER_ACCESS_TOKEN", main_token)
     page_token = _get("PAGE_ACCESS_TOKEN", main_token)
 
-    # ── Load Multiple Gemini Keys for Project-Level Quota Pooling ─────────
     gemini_keys = []
-    for i in range(1, 11):  # Support up to 10 keys
+    for i in range(1, 11):
         key_env = "GEMINI_API_KEY" if i == 1 else f"GEMINI_API_KEY_{i}"
         key = _get(key_env)
         if key:
