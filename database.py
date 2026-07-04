@@ -86,6 +86,11 @@ def init_db():
             dm_message TEXT NOT NULL, is_active BOOLEAN DEFAULT TRUE, created_at TIMESTAMPTZ DEFAULT NOW())""")
         cur.execute("""CREATE TABLE IF NOT EXISTS dm_cooldowns (
             user_id TEXT PRIMARY KEY, sent_at TIMESTAMPTZ DEFAULT NOW())""")
+            
+        # 🌟 NEW: Human Handoff Cooldowns (24h Admin Takeover)
+        cur.execute("""CREATE TABLE IF NOT EXISTS human_handoff_cooldowns (
+            user_id TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL
+        )""")
 
         cur.execute("""INSERT INTO system_config (key, value) VALUES
             ('bot_paused', 'false'), ('gemini_enabled', 'true'), ('safe_mode', 'false'),
@@ -159,6 +164,26 @@ def claim_welcome_dm(user_id: str) -> bool:
     with get_db() as cur:
         cur.execute("INSERT INTO dm_cooldowns (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
         return cur.rowcount == 1
+
+# 🌟 NEW: Human Handoff (Admin Takeover) ─────────────────
+def set_human_handoff(user_id: str, hours: int = 24):
+    """Locks the bot for a specific user for X hours."""
+    expires = datetime.now(timezone.utc) + timedelta(hours=hours)
+    with get_db() as cur:
+        cur.execute("""
+            INSERT INTO human_handoff_cooldowns (user_id, expires_at)
+            VALUES (%s, %s)
+            ON CONFLICT (user_id) DO UPDATE SET expires_at = EXCLUDED.expires_at
+        """, (user_id, expires))
+
+def is_in_human_handoff(user_id: str) -> bool:
+    """Checks if the user is currently in human handoff mode."""
+    with get_db() as cur:
+        cur.execute("""
+            SELECT 1 FROM human_handoff_cooldowns
+            WHERE user_id = %s AND expires_at > NOW()
+        """, (user_id,))
+        return cur.fetchone() is not None
 
 # ── Gemini Quotas ────────────────────────────────────────
 def increment_gemini_count(model_id: str) -> int:
