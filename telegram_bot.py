@@ -109,6 +109,23 @@ def handle_update(update: dict):
             logs = db.get_recent_activity()
             _send(chat_id, "📋 <b>Recent Activity:</b>\n" + "\n".join([f"• {l['action']} at {l['created_at'].strftime('%H:%M:%S')}" for l in logs]) if logs else "No activity.")
         elif cmd == "/ping": _send(chat_id, "🏓 <b>Pong</b>\nBot: Running\nDatabase: Connected\nTelegram: OK")
+        
+        # 🌟 ADDED: /help command for better UX
+        elif cmd == "/help":
+            _send(chat_id, (
+                "🦚 <b>Krishna Verse AI Help</b>\n\n"
+                "Use /menu for the interactive dashboard.\n\n"
+                "<b>Quick Commands:</b>\n"
+                "/status — Live stats & Quotas\n"
+                "/pause — Stop bot\n"
+                "/resume — Start bot\n"
+                "/panic — Emergency stop\n"
+                "/caption topic — Generate caption\n"
+                "/festivals — Upcoming festivals\n"
+                "/c2dm — Comment-to-DM setup\n"
+                "/logs — Recent activity"
+            ))
+            
         elif cmd == "/c2dm": show_c2dm_main_menu(chat_id)
             
     except Exception: logger.error(f"Telegram command failed:\n{traceback.format_exc()}")
