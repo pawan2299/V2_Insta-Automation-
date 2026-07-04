@@ -50,15 +50,33 @@ def handle_update(update: dict):
         msg = update.get("message")
         if not msg: return
         chat_id = str(msg.get("chat", {}).get("id", ""))
-        text = msg.get("text", "").strip()
-        if chat_id != SETTINGS.telegram_chat_id or not text.startswith("/"): return
+        text = (msg.get("text") or "").strip()
+        if chat_id != SETTINGS.telegram_chat_id: return
+        
+        # 🌟 FIX 5: State Machine Collision Prevention
+        state = db.get_telegram_state(chat_id)
+        if state and state.get("action") == "c2dm_setup":
+            if text.lower() == "/cancel":
+                db.clear_telegram_state(chat_id)
+                _send(chat_id, "❌ Setup cancelled.")
+                show_c2dm_main_menu(chat_id)
+                return
+            elif not text.startswith("/"):
+                handle_c2dm_text_input(chat_id, text, state)
+                return
+            else:
+                # User typed a command (e.g. /status) during setup. Clear state and proceed to command.
+                db.clear_telegram_state(chat_id)
+                _send(chat_id, "⚠️ <i>Setup cancelled due to new command.</i>")
+
+        if not text.startswith("/"): return
         
         cmd_parts = text.split()
         cmd = cmd_parts[0].lower().split("@")[0]
         args = cmd_parts[1:]
 
         if cmd == "/start" or cmd == "/menu":
-            _send(chat_id, "🦚 <b>Krishna Verse AI Control Center</b>\n\nSelect a category:", reply_markup=MAIN_MENU_BUTTONS)
+            _send(chat_id, "🦚 <b>Krishna Verse AI Control Center</b>\nSelect a category:", reply_markup=MAIN_MENU_BUTTONS)
         elif cmd == "/status": send_status_update(chat_id)
         elif cmd == "/festivals": send_festivals_update(chat_id)
         elif cmd == "/pause":
@@ -92,11 +110,6 @@ def handle_update(update: dict):
             _send(chat_id, "📋 <b>Recent Activity:</b>\n" + "\n".join([f"• {l['action']} at {l['created_at'].strftime('%H:%M:%S')}" for l in logs]) if logs else "No activity.")
         elif cmd == "/ping": _send(chat_id, "🏓 <b>Pong</b>\nBot: Running\nDatabase: Connected\nTelegram: OK")
         elif cmd == "/c2dm": show_c2dm_main_menu(chat_id)
-        
-        # Handle C2DM Text Input State Machine
-        state = db.get_telegram_state(chat_id)
-        if state and state.get("action") == "c2dm_setup":
-            handle_c2dm_text_input(chat_id, text, state)
             
     except Exception: logger.error(f"Telegram command failed:\n{traceback.format_exc()}")
 
@@ -125,7 +138,7 @@ def send_status_update(chat_id: str, msg_id: int = None):
 
 def send_festivals_update(chat_id: str, msg_id: int = None):
     upcoming = get_upcoming_festivals(days_ahead=30)
-    text = "🎉 <b>Upcoming Festivals (Next 30 Days)</b>\n\n"
+    text = "🎉 <b>Upcoming Festivals (Next 30 Days)</b>\n"
     if not upcoming: text += "<i>No major festivals.</i>\n"
     else:
         for fest in upcoming:
@@ -162,11 +175,6 @@ def handle_callback_query(query: dict):
     elif data.startswith("c2dm_del_"): db.delete_c2dm_trigger(int(data.split("_")[2])); show_c2dm_list(chat_id, msg_id)
 
 def handle_c2dm_text_input(chat_id: str, text: str, state: dict):
-    if text.lower() == "/cancel":
-        db.clear_telegram_state(chat_id)
-        _send(chat_id, "❌ Setup cancelled.")
-        show_c2dm_main_menu(chat_id)
-        return
     step = state.get("step", 1)
     if step == 1:
         state["keyword"] = text.strip(); state["step"] = 2
