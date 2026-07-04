@@ -1,11 +1,11 @@
 from __future__ import annotations
 import logging
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify, render_template_string
 from config import SETTINGS
-from database import init_db, is_safe_mode, set_config, get_config, get_stats, get_recent_activity, list_keywords, get_model_rpd
+from database import init_db, is_safe_mode, set_config, get_config, get_stats, get_recent_activity, list_keywords, get_model_rpd, cleanup_old_data
 from security import verify_signature
 from bot_logic import handle_comment, handle_dm, handle_new_follower
 from telegram_bot import handle_update, _send, get_webhook_info, register_telegram_webhook, check_and_send_festival_reminders, check_and_send_token_expiry_alert
@@ -16,13 +16,10 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 _init_done = False
-_init_lock = threading.Lock() if 'threading' in globals() else __import__('threading').Lock()
-
-# 🌟 FIX 1: ThreadPoolExecutor (Prevents Thread Bomb & OOM Crashes)
-executor = ThreadPoolExecutor(max_workers=10)
+_init_lock = threading.Lock()
 
 _reply_counts = []
-_reply_lock = __import__('threading').Lock()
+_reply_lock = threading.Lock()
 MAX_REPLIES_PER_MINUTE = 20
 
 def _check_rate_limit() -> bool:
@@ -32,14 +29,13 @@ def _check_rate_limit() -> bool:
         if len(_reply_counts) >= MAX_REPLIES_PER_MINUTE:
             if not is_safe_mode():
                 set_config("safe_mode", "true")
-                _send(SETTINGS.telegram_chat_id, "🚨 <b>Global Rate Limit Triggered!</b>\nSafe Mode enabled.")
+                _send(SETTINGS.telegram_chat_id, "🚨 <b>Global Rate Limit Triggered!</b>\nSafe Mode enabled to prevent API Ban.")
             return False
         _reply_counts.append(now)
         return True
 
 def _startup():
     global _init_done
-    import threading
     with _init_lock:
         if _init_done: return
         try:
@@ -48,7 +44,7 @@ def _startup():
             ig_valid = check_token_validity("ig_user")
             page_valid = check_token_validity("page_access")
             wh_url = get_webhook_info().get("result", {}).get("url", "None")
-            _send(SETTINGS.telegram_chat_id, f"🦚 <b>Krishna Bot Startup</b>\nIG: {'✅' if ig_valid else '❌'}\nPage: {'✅' if page_valid else '❌'}\nTG Webhook: <code>{wh_url}</code>")
+            _send(SETTINGS.telegram_chat_id, f"🦚 <b>Krishna Bot V3.1 Startup</b>\nIG: {'✅' if ig_valid else '❌'}\nPage: {'✅' if page_valid else '❌'}\nTG Webhook: <code>{wh_url}</code>")
             _init_done = True
         except Exception as e: logger.critical(f"Startup failed: {e}"); sys.exit(1)
 
@@ -96,22 +92,37 @@ def webhook():
     def process():
         check_and_send_festival_reminders()
         check_and_send_token_expiry_alert()
-        if not _check_rate_limit() and not is_safe_mode(): return
+        
+        # 🌟 CRITICAL FIX: Always respect rate limit to prevent Instagram API Ban
+        if not _check_rate_limit(): return 
+        
         for entry in data.get("entry", []):
             for msg in entry.get("messaging", []): handle_dm(msg)
             for change in entry.get("changes", []):
                 if change.get("field") == "comments": handle_comment(change.get("value", {}))
                 elif change.get("field") == "follows": handle_new_follower(change.get("value", {}).get("id", ""))
-                
-    # 🌟 FIX 1: Safe Concurrency
-    executor.submit(process)
+    threading.Thread(target=process, daemon=True).start()
     return "OK", 200
 
 @app.post("/telegram-webhook")
 def telegram_webhook():
-    update = request.get_json(silent=True) or {}
-    # 🌟 FIX 1: Safe Concurrency
-    executor.submit(handle_update, update)
+    threading.Thread(target=handle_update, args=(request.get_json(silent=True) or {},), daemon=True).start()
     return "OK", 200
+
+# 🌟 ADDED BACK: Weekly Report & Auto DB Cleanup
+@app.get("/weekly-report")
+def weekly_report_trigger():
+    try:
+        from gemini_client import generate_weekly_insight
+        stats = get_stats()
+        insight = generate_weekly_insight(stats)
+        if insight:
+            _send(SETTINGS.telegram_chat_id, f"📊 <b>Weekly Report</b>\nReplies: {stats['total_comments_replied']}\nDMs: {stats['welcome_dms_sent']}\n\n💡 {insight}")
+        
+        # Auto Cleanup to save Neon.tech DB space
+        cleanup_old_data()
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__": app.run(host="0.0.0.0", port=SETTINGS.port, debug=False)
