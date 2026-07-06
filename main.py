@@ -10,7 +10,7 @@ from flask import Flask, request, jsonify, render_template, Response
 from config import SETTINGS
 from database import (init_db, is_safe_mode, set_config, get_config, get_stats, 
                       get_recent_activity, list_keywords, get_model_rpd, cleanup_old_data, 
-                      get_failed_webhooks, delete_failed_webhook, start_db_keepalive, is_bot_paused)
+                      get_and_lock_failed_webhooks, delete_failed_webhook, start_db_keepalive, is_bot_paused)
 from security import verify_signature
 from bot_logic import handle_comment, handle_dm
 from telegram_bot import handle_update, _send, get_webhook_info, register_telegram_webhook, check_and_send_festival_reminders, check_and_send_token_expiry_alert
@@ -21,8 +21,6 @@ logging.basicConfig(level=getattr(logging, SETTINGS.log_level, logging.INFO), fo
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__, template_folder='templates')
-
-# ✅ FIX: ThreadPool reduced to 5 to match DB connections
 executor = ThreadPoolExecutor(max_workers=5)
 
 webhook_metrics = deque(maxlen=100)
@@ -39,6 +37,27 @@ def start_memory_monitor():
             if mem > 85: 
                 _send(SETTINGS.telegram_chat_id, f"🚨 <b>High Memory Alert!</b>\nUsage: {mem}%")
     threading.Thread(target=monitor, daemon=True).start()
+
+# ✅ NEW: Auto-Retry Background Worker
+def start_auto_retry_worker():
+    def worker():
+        while True:
+            time.sleep(1800) # 30 minutes
+            try:
+                failed = get_and_lock_failed_webhooks(5)
+                if not failed: continue
+                logger.info(f"🔄 Auto-retry worker processing {len(failed)} failed webhooks...")
+                for row in failed:
+                    try:
+                        payload = row['payload']
+                        if 'messaging' in payload: handle_dm(payload['messaging'][0])
+                        elif 'changes' in payload: handle_comment(payload['changes'][0].get('value', {}))
+                        delete_failed_webhook(row['event_id'])
+                    except Exception as e:
+                        logger.error(f"❌ Auto-retry failed for {row['event_id']}: {e}")
+            except Exception as e:
+                logger.error(f"❌ Auto-retry worker crashed: {e}")
+    threading.Thread(target=worker, daemon=True).start()
 
 def _check_rate_limit() -> bool:
     now = time.time()
@@ -57,16 +76,14 @@ def _startup():
         init_db()
         start_db_keepalive()
         start_memory_monitor()
+        start_auto_retry_worker() # ✅ Start Auto-Retry
         register_telegram_webhook()
-        
-        # ✅ FIX: Moved heavy checks out of webhook, run once on startup
         check_and_send_festival_reminders()
         check_and_send_token_expiry_alert()
-        
         ig_valid = check_token_validity("ig_user")
         page_valid = check_token_validity("page_access")
         wh_url = get_webhook_info().get("result", {}).get("url", "None")
-        _send(SETTINGS.telegram_chat_id, f"🦚 <b>Krishna Bot V5.0 Enterprise Startup</b>\nIG: {'✅' if ig_valid else '❌'}\nPage: {'✅' if page_valid else '❌'}\nTG Webhook: <code>{wh_url}</code>")
+        _send(SETTINGS.telegram_chat_id, f"🦚 <b>Krishna Bot V7.0 Enterprise Startup</b>\nIG: {'✅' if ig_valid else '❌'}\nPage: {'✅' if page_valid else '❌'}\nTG Webhook: <code>{wh_url}</code>")
     except Exception as e: 
         logger.critical(f"❌ Startup failed: {e}")
         sys.exit(1)
@@ -141,19 +158,15 @@ def webhook():
     is_error = False
     
     def process():
-        nonlocal is_error, event_count  # ✅ FIX: Added event_count to nonlocal (Solves UnboundLocalError)
+        nonlocal is_error, event_count
         try:
-            # ✅ FIX: Removed heavy festival/token checks from here to save DB hits on every comment
             if not _check_rate_limit(): return
-            
             for entry in data.get("entry", []):
                 event_count += len(entry.get("messaging", []))
                 event_count += len(entry.get("changes", []))
                 for msg in entry.get("messaging", []): handle_dm(msg)
                 for change in entry.get("changes", []):
-                    if change.get("field") == "comments": 
-                        handle_comment(change.get("value", {}))
-                    # ✅ FIX: Removed 'follows' trigger to prevent Meta Policy violations & API waste
+                    if change.get("field") == "comments": handle_comment(change.get("value", {}))
         except Exception as e:
             is_error = True
             logger.error(f"❌ Webhook processing error: {e}")
@@ -168,7 +181,7 @@ def webhook():
 
 @app.post("/retry-failed-webhooks")
 def retry_failed():
-    failed = get_failed_webhooks(10)
+    failed = get_and_lock_failed_webhooks(10)
     if not failed: return jsonify({"message": "No failed webhooks found."})
     success_count = 0
     for row in failed:
