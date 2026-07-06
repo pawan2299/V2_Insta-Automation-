@@ -35,6 +35,14 @@ def _record_call(model_id: str):
     _model_rpm_calls[model_id].append(time.time())
     increment_gemini_count(model_id)
 
+def _record_failure_and_maybe_trip_breaker():
+    count = int(get_config("consecutive_429s") or 0) + 1
+    set_config("consecutive_429s", str(count))
+    if count >= 8:
+        until = time.time() + 900
+        set_config("circuit_breaker_until", str(until))
+        logger.critical(f"🚨 Circuit Breaker Tripped! {count} consecutive failures. AI disabled for 15 mins.")
+
 def _clean_json_string(text: str) -> str:
     text = re.sub(r'^```(?:json)?\s*', '', text.strip(), flags=re.IGNORECASE)
     text = re.sub(r'\s*```$', '', text.strip())
@@ -49,17 +57,14 @@ def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", im
         models_to_try = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
 
     contents = [prompt]
-    
-    # Safe Image Download with strict size limits to prevent OOM on 512MB RAM
     if image_url:
         try:
             head_resp = requests.head(image_url, timeout=3, allow_redirects=True)
             content_length = int(head_resp.headers.get('Content-Length', 0))
-            # Strict limit: 2MB max to protect Render Free Tier RAM
             if 0 < content_length < 2 * 1024 * 1024:
                 img_data = requests.get(image_url, timeout=5).content
                 contents.append(types.Part.from_bytes(data=img_data, mime_type="image/jpeg"))
-                del img_data # Free memory immediately
+                del img_data
         except Exception as e:
             logger.warning(f"⚠️ Image download skipped for {image_url}: {e}")
 
@@ -68,12 +73,10 @@ def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", im
         config_kwargs["response_mime_type"] = "application/json"
         config_kwargs["response_schema"] = response_schema
         config_kwargs["temperature"] = 0.1
-        
     config = types.GenerateContentConfig(**config_kwargs)
 
     for client_idx, client in enumerate(_clients):
         for model_id in models_to_try:
-            # Per-Key Cooldown Check
             until = get_config(f"cooldown_{model_id}_{client_idx}")
             if until and until != "0" and time.time() < float(until):
                 continue
@@ -97,17 +100,18 @@ def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", im
                 _record_call(model_id)
                 set_config("consecutive_429s", "0")
                 logger.info(f"✅ Gemini API Success: {model_id} (Key {client_idx}) | Latency: {latency_ms:.0f}ms | Task: {task_type}")
-                
                 return (resp.text or "").strip()
             except Exception as e:
                 error_msg = str(e)
                 logger.error(f"❌ Gemini API Failed: {model_id} (Key {client_idx}) | Error: {error_msg}")
                 if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
                     set_config(f"cooldown_{model_id}_{client_idx}", str(time.time() + 300))
+                    _record_failure_and_maybe_trip_breaker()
                     continue
                 elif "400" in error_msg and "SAFETY" in error_msg:
                     return None
                 else:
+                    _record_failure_and_maybe_trip_breaker()
                     break
     return None
 
@@ -124,7 +128,7 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
         "RULES:\n"
         "- Keep replies VERY short (under 15 words).\n"
         "- Be cute, warm, and conversational.\n"
-        "- NEVER use heavy devotional blessings. They feel awkward and robotic.\n"
+        "- NEVER use heavy devotional blessings.\n"
         "- NEVER ask people to follow in every reply.\n"
         "- Match the user's language (Hindi/English/Hinglish).\n"
         "- Do NOT use markdown formatting like **bold**.\n"
@@ -143,11 +147,9 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
 
 def generate_dm_reply(message_text: str, user_id: str) -> str | None:
     if not can_use_gemini(): return None
-    
     summary = get_conversation_summary(user_id)
     history = get_dm_memory(user_id, 3)
     history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in history]) if history else ""
-    
     summary_context = f"\n[Long-term Context Summary]: {summary}\n" if summary else ""
     
     prompt = (
@@ -257,7 +259,6 @@ def generate_festival_list(years: list[int]) -> list[dict] | None:
     result = _generate(prompt, max_length=4000, task_type="dm")
     if not result: return None
     
-    # Robust JSON extraction (Handles AI adding extra text before/after JSON)
     start_idx = result.find('[')
     end_idx = result.rfind(']')
     if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
