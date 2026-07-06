@@ -48,13 +48,16 @@ def get_db():
         # ✅ Health Check: Verify connection is alive before yielding
         try:
             with conn.cursor() as test_cur: test_cur.execute("SELECT 1")
-        except Exception:
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
             logger.warning("Stale connection detected, recreating pool.")
             try: _pool.putconn(conn, close=True)
             except Exception: pass
             conn = None
             init_pool(force=True)
             conn = _pool.getconn()
+        except Exception as e:
+            logger.error(f"Unexpected error during connection health check: {e}")
+            raise
             
         with conn.cursor() as cur: yield cur
         conn.commit()
@@ -152,10 +155,19 @@ def trim_old_memories(user_id: str, keep_last: int = 3):
 def start_db_keepalive():
     def ping():
         while True:
-            time.sleep(240) # 4 minutes
+            time.sleep(60) # Reduced to 1 minute for better stability
             try:
-                with get_db() as cur: cur.execute("SELECT 1")
-            except Exception as e: logger.error(f"DB keepalive failed: {e}")
+                # Direct pool access to avoid recursive get_db() calls
+                global _pool
+                if _pool:
+                    conn = _pool.getconn()
+                    try:
+                        with conn.cursor() as cur: cur.execute("SELECT 1")
+                        conn.commit()
+                    finally:
+                        _pool.putconn(conn)
+            except Exception as e:
+                logger.debug(f"DB keepalive ping skipped or failed: {e}")
     threading.Thread(target=ping, daemon=True).start()
 
 def get_config(key: str) -> str:
