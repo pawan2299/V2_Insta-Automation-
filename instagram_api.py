@@ -6,7 +6,6 @@ from config import SETTINGS
 
 logger = logging.getLogger(__name__)
 GRAPH_BASE = "https://graph.facebook.com/v25.0"
-INSTA_BASE = "https://graph.instagram.com/v25.0"
 TIMEOUT = 10
 
 def _graph_post(endpoint: str, data: dict, token: str) -> bool:
@@ -21,11 +20,10 @@ def reply_to_comment(comment_id: str, message: str) -> bool:
     return _graph_post(f"{comment_id}/replies", {"message": message}, SETTINGS.ig_user_token)
 
 def send_dm(user_id: str, message: str) -> bool:
-    message = message.replace("@", "") # Prevent truncation bug
+    message = message.replace("@", "")
     headers = {"Authorization": f"Bearer {SETTINGS.dm_access_token}", "Content-Type": "application/json"}
     try:
-        resp = requests.post("https://graph.instagram.com/v25.0/me/messages", headers=headers,
-            json={"recipient": {"id": user_id}, "message": {"text": message}}, timeout=TIMEOUT)
+        resp = requests.post("https://graph.instagram.com/v25.0/me/messages", headers=headers, json={"recipient": {"id": user_id}, "message": {"text": message}}, timeout=TIMEOUT)
         if resp.ok: return True
         logger.error(f"DM Failed: {resp.status_code} | {resp.text}")
         return False
@@ -33,8 +31,7 @@ def send_dm(user_id: str, message: str) -> bool:
 
 def get_media_details(media_id: str) -> dict:
     try:
-        resp = requests.get(f"{GRAPH_BASE}/{media_id}",
-            params={"fields": "media_url,permalink,caption,media_type", "access_token": SETTINGS.ig_user_token}, timeout=TIMEOUT)
+        resp = requests.get(f"{GRAPH_BASE}/{media_id}", params={"fields": "media_url,permalink,caption,media_type", "access_token": SETTINGS.ig_user_token}, timeout=TIMEOUT)
         if resp.ok:
             data = resp.json()
             return {"url": data.get("media_url"), "caption": data.get("caption", ""), "type": data.get("media_type", "")}
