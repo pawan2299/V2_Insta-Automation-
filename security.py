@@ -6,7 +6,6 @@ from config import SETTINGS
 
 logger = logging.getLogger(__name__)
 
-
 def verify_signature(payload: bytes, signature: str) -> bool:
     if not SETTINGS.app_secret:
         logger.warning("APP_SECRET missing — skipping verification")
