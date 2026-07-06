@@ -4,7 +4,4 @@ requests>=2.32.0
 psycopg2-binary>=2.9.9
 google-genai>=1.0.0
 python-dotenv>=1.0.1
-# ✅ NEW: Enterprise Features
-Pillow>=10.0.0      # Image compression (512x512)
 psutil>=5.9.0       # Memory usage monitoring
-matplotlib>=3.7.0   # Weekly visual reports
