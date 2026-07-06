@@ -4,14 +4,14 @@ import random
 import re
 import time
 from database import (
-    is_already_replied, log_reply, claim_event, 
+    is_already_replied, log_reply, claim_event, claim_c2dm_dm,
     is_bot_paused, is_gemini_enabled, is_safe_mode, get_config, set_config,
     get_keyword_reply, is_active_hours, is_c2dm_enabled, find_c2dm_trigger,
     save_dm_memory, is_in_human_handoff, set_human_handoff,
     save_failed_webhook, get_dm_memory, save_conversation_summary, trim_old_memories
 )
 from gemini_client import (
-    generate_reply, can_use_gemini, generate_dm_reply, 
+    generate_reply, can_use_gemini, generate_dm_reply,
     is_spam_or_negative, _gemini_should_reply_dm, classify_comment_intent, 
     generate_story_thank_you, summarize_conversation
 )
@@ -29,7 +29,7 @@ ESCALATION_ACK_DM = "Hi there! 👋 I've passed your message to the admin. They'
 def _is_emoji_only(text: str) -> bool:
     clean = re.sub(r'[\s!.,?@#\-_]', '', text)
     if not clean: return True
-    if re.search(r'[a-zA-Z0-9]', clean): return False
+    if re.search(r'[a-zA-Z0-9\u0900-\u097F]', clean): return False
     return True
 
 SPAM_SIGNALS = {"follow", "check", "link", "bio", "giveaway", "free", "click", "promo", "dm me", "collab"}
@@ -43,7 +43,6 @@ def handle_comment(comment_data: dict):
     start_time = time.time()
     try:
         if is_bot_paused() or not is_active_hours(): return
-        
         comment_id = comment_data.get("id", "")
         text = comment_data.get("text", "").strip()
         from_id = str(comment_data.get("from", {}).get("id", ""))
@@ -55,13 +54,13 @@ def handle_comment(comment_data: dict):
         if not claim_event(comment_id): return
         if is_already_replied(comment_id): return
 
-        # C2DM Check (Your requested feature)
         if is_c2dm_enabled():
             trigger = find_c2dm_trigger(text)
             if trigger:
                 logger.info(f"✅ C2DM Triggered for keyword: '{trigger['keyword']}'")
                 reply_to_comment(comment_id, trigger['public_reply'])
-                send_dm(from_id, trigger['dm_message'])
+                if claim_c2dm_dm(from_id, trigger['keyword']):
+                    send_dm(from_id, trigger['dm_message'])
                 log_reply(comment_id, from_id, trigger['public_reply'], media_id, "c2dm")
                 return
 
@@ -73,29 +72,32 @@ def handle_comment(comment_data: dict):
             reply = random.choice(EMOJI_REPLIES)
             reply_type = "emoji"
         else:
-            if len(text) > 15 and _looks_suspicious(text) and use_ai:
-                if is_spam_or_negative(text):
-                    logger.info(f"🛡️ [SPAM FILTERED] Comment: {text[:50]}...")
-                    log_reply(comment_id, from_id, "[Filtered Spam]", media_id)
-                    return
-            
-            reply = get_keyword_reply(text)
-            reply_type = "keyword"
-            
-            if reply is None and use_ai:
+            # ✅ CONSOLIDATED SPAM CHECK
+            is_spam = False
+            if _looks_suspicious(text):
+                if use_ai and is_spam_or_negative(text): is_spam = True
+            elif use_ai:
                 intent = classify_comment_intent(text)
-                reply_type = intent
-                if intent == "spam":
-                    logger.info(f"🛡️ [AI FILTERED] Comment: {text[:50]}...")
-                    log_reply(comment_id, from_id, "[AI Filtered Spam]", media_id)
-                    return
+                if intent == "spam": is_spam = True
                 elif intent in ("greeting", "praise"):
                     reply = random.choice(AESTHETIC_REPLIES)
-                else:
-                    details = get_media_details(media_id) if media_id else {}
-                    image_url = details.get("url") if details.get("type") == "IMAGE" else None
-                    post_caption = details.get("caption", "")
-                    reply = generate_reply(text, post_caption=post_caption, image_url=image_url)
+                    reply_type = intent
+            
+            if is_spam:
+                logger.info(f"🛡️ [SPAM FILTERED] Comment: {text[:50]}...")
+                log_reply(comment_id, from_id, "[Filtered Spam]", media_id)
+                return
+            
+            if reply is None:
+                reply = get_keyword_reply(text)
+                reply_type = "keyword"
+                
+            if reply is None and use_ai:
+                details = get_media_details(media_id) if media_id else {}
+                image_url = details.get("url") if details.get("type") == "IMAGE" else None
+                post_caption = details.get("caption", "")
+                reply = generate_reply(text, post_caption=post_caption, image_url=image_url)
+                reply_type = "ai"
             elif reply is None:
                 reply = random.choice(AESTHETIC_REPLIES)
                 reply_type = "fallback"
@@ -123,7 +125,6 @@ def handle_dm(dm_data: dict):
     try:
         if is_bot_paused(): return
         if dm_data.get("message", {}).get("is_echo", False): return
-        
         sender_id = str(dm_data.get("sender", {}).get("id", ""))
         message_text = (dm_data.get("message", {}).get("text") or "").strip()
         message_id = dm_data.get("message", {}).get("mid", "")
@@ -148,7 +149,6 @@ def handle_dm(dm_data: dict):
 
         save_dm_memory(sender_id, "user", message_text)
         use_ai = is_gemini_enabled() and not is_safe_mode()
-        
         reply = get_keyword_reply(message_text)
         reply_type = "keyword"
         
