@@ -53,7 +53,6 @@ def handle_update(update: dict):
         text = (msg.get("text") or "").strip()
         if chat_id != SETTINGS.telegram_chat_id: return
         
-        # 🌟 FIX 5: State Machine Collision Prevention
         state = db.get_telegram_state(chat_id)
         if state and state.get("action") == "c2dm_setup":
             if text.lower() == "/cancel":
@@ -65,18 +64,16 @@ def handle_update(update: dict):
                 handle_c2dm_text_input(chat_id, text, state)
                 return
             else:
-                # User typed a command (e.g. /status) during setup. Clear state and proceed to command.
                 db.clear_telegram_state(chat_id)
                 _send(chat_id, "⚠️ <i>Setup cancelled due to new command.</i>")
 
         if not text.startswith("/"): return
-        
         cmd_parts = text.split()
         cmd = cmd_parts[0].lower().split("@")[0]
         args = cmd_parts[1:]
 
         if cmd == "/start" or cmd == "/menu":
-            _send(chat_id, "🦚 <b>Krishna Verse AI Control Center</b>\nSelect a category:", reply_markup=MAIN_MENU_BUTTONS)
+            _send(chat_id, " <b>Krishna Verse AI Control Center</b>\nSelect a category:", reply_markup=MAIN_MENU_BUTTONS)
         elif cmd == "/status": send_status_update(chat_id)
         elif cmd == "/festivals": send_festivals_update(chat_id)
         elif cmd == "/pause":
@@ -107,25 +104,10 @@ def handle_update(update: dict):
             _send(chat_id, f"✅ Sleep hours set: {s}:00 to {e}:00 IST")
         elif cmd == "/logs":
             logs = db.get_recent_activity()
-            _send(chat_id, "📋 <b>Recent Activity:</b>\n" + "\n".join([f"• {l['action']} at {l['created_at'].strftime('%H:%M:%S')}" for l in logs]) if logs else "No activity.")
+            _send(chat_id, " <b>Recent Activity:</b>\n" + "\n".join([f"• {l['action']} at {l['created_at'].strftime('%H:%M:%S')}" for l in logs]) if logs else "No activity.")
         elif cmd == "/ping": _send(chat_id, "🏓 <b>Pong</b>\nBot: Running\nDatabase: Connected\nTelegram: OK")
-        
-        # 🌟 ADDED: /help command for better UX
         elif cmd == "/help":
-            _send(chat_id, (
-                "🦚 <b>Krishna Verse AI Help</b>\n\n"
-                "Use /menu for the interactive dashboard.\n\n"
-                "<b>Quick Commands:</b>\n"
-                "/status — Live stats & Quotas\n"
-                "/pause — Stop bot\n"
-                "/resume — Start bot\n"
-                "/panic — Emergency stop\n"
-                "/caption topic — Generate caption\n"
-                "/festivals — Upcoming festivals\n"
-                "/c2dm — Comment-to-DM setup\n"
-                "/logs — Recent activity"
-            ))
-            
+            _send(chat_id, "🦚 <b>Krishna Verse AI Help</b>\n\nUse /menu for the interactive dashboard.\n\n<b>Quick Commands:</b>\n/status — Live stats & Quotas\n/pause — Stop bot\n/resume — Start bot\n/panic — Emergency stop\n/caption topic — Generate caption\n/festivals — Upcoming festivals\n/c2dm — Comment-to-DM setup\n/logs — Recent activity")
         elif cmd == "/c2dm": show_c2dm_main_menu(chat_id)
             
     except Exception: logger.error(f"Telegram command failed:\n{traceback.format_exc()}")
@@ -140,7 +122,7 @@ def send_status_update(chat_id: str, msg_id: int = None):
 
     text = f"📊 <b>Bot Status:</b> {state_str}\n🤖 <b>Gemini:</b> {'🟢 ON' if stats['gemini_enabled'] else '⚪ OFF'}\n"
     text += f"🚨 <b>Circuit Breaker:</b> {'ACTIVE' if stats['circuit_breaker_active'] else '🟢 OK'}\n📈 <b>Total Calls Today:</b> {gemini_count}\n\n"
-    text += "<b>🔋 Gemini Quotas (Today)</b>\n"
+    text += "<b> Gemini Quotas (Today)</b>\n"
     total_pool = len(_clients) if _clients else 1
     for m in MODEL_CONFIGS:
         used = db.get_model_rpd(m["id"])
@@ -149,13 +131,13 @@ def send_status_update(chat_id: str, msg_id: int = None):
         text += f"<code>{bar}</code> {m['label']}\n     {used} / {limit} requests\n\n"
     text += f"💌 <b>Replies (24h):</b> {stats['last_24h_replies']}"
     
-    back_btn = {"inline_keyboard": [[{"text": "🔙 Back to Menu", "callback_data": "menu_main"}]]}
+    back_btn = {"inline_keyboard": [[{"text": " Back to Menu", "callback_data": "menu_main"}]]}
     if msg_id: _edit_message(chat_id, msg_id, text, reply_markup=back_btn)
     else: _send(chat_id, text, reply_markup=back_btn)
 
 def send_festivals_update(chat_id: str, msg_id: int = None):
     upcoming = get_upcoming_festivals(days_ahead=30)
-    text = "🎉 <b>Upcoming Festivals (Next 30 Days)</b>\n"
+    text = " <b>Upcoming Festivals (Next 30 Days)</b>\n"
     if not upcoming: text += "<i>No major festivals.</i>\n"
     else:
         for fest in upcoming:
@@ -173,7 +155,7 @@ def handle_callback_query(query: dict):
     elif data == "menu_status": send_status_update(chat_id, msg_id)
     elif data == "menu_festivals": send_festivals_update(chat_id, msg_id)
     elif data == "menu_controls":
-        controls = {"inline_keyboard": [[{"text": "⏸ Pause", "callback_data": "ctrl_pause"}, {"text": "▶️ Resume", "callback_data": "ctrl_resume"}], [{"text": "🚨 Panic", "callback_data": "ctrl_panic"}], [{"text": "🔙 Back", "callback_data": "menu_main"}]]}
+        controls = {"inline_keyboard": [[{"text": "⏸ Pause", "callback_data": "ctrl_pause"}, {"text": "▶️ Resume", "callback_data": "ctrl_resume"}], [{"text": "🚨 Panic", "callback_data": "ctrl_panic"}], [{"text": " Back", "callback_data": "menu_main"}]]}
         _edit_message(chat_id, msg_id, "⚙️ <b>System Controls</b>", reply_markup=controls)
     elif data == "menu_ai":
         ai_btns = {"inline_keyboard": [[{"text": "✨ AI On", "callback_data": "ctrl_ai_on"}, {"text": "⚪ AI Off", "callback_data": "ctrl_ai_off"}], [{"text": "🔙 Back", "callback_data": "menu_main"}]]}
@@ -250,7 +232,7 @@ def show_c2dm_main_menu(chat_id: str, msg_id: int = None):
 def show_c2dm_list(chat_id: str, msg_id: int = None):
     triggers = db.get_c2dm_triggers()
     btns = [[{"text": f"🗑 {t['keyword']}", "callback_data": f"c2dm_del_{t['id']}"}] for t in triggers]
-    btns.append([{"text": "🔙 Back", "callback_data": "c2dm_menu"}])
+    btns.append([{"text": " Back", "callback_data": "c2dm_menu"}])
     text = "📋 <b>Triggers:</b>\n" + "\n".join([f"• {t['keyword']}" for t in triggers]) if triggers else "No triggers."
     if msg_id: _edit_message(chat_id, msg_id, text, reply_markup={"inline_keyboard": btns})
     else: _send(chat_id, text, reply_markup={"inline_keyboard": btns})
