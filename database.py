@@ -24,6 +24,7 @@ def init_pool(force: bool = False):
             except Exception: pass
             _pool = None
         try:
+            # ✅ FIX: maxconn=6 to support ThreadPoolExecutor(5) + 1 extra for background tasks
             _pool = pool.ThreadedConnectionPool(
                 minconn=1, maxconn=6, dsn=SETTINGS.database_url,
                 cursor_factory=RealDictCursor, connect_timeout=20,
@@ -43,6 +44,7 @@ def get_db():
             logger.warning("DB pool closed. Reinitializing...")
             init_pool(force=True)
         conn = _pool.getconn()
+        # ✅ Health Check: Verify connection is alive before yielding
         try:
             with conn.cursor() as test_cur: test_cur.execute("SELECT 1")
         except (psycopg2.OperationalError, psycopg2.InterfaceError):
@@ -80,18 +82,27 @@ def init_db():
         cur.execute("""CREATE TABLE IF NOT EXISTS conversation_summaries (user_id TEXT PRIMARY KEY, summary TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())""")
         cur.execute("""CREATE TABLE IF NOT EXISTS c2dm_cooldowns (user_id TEXT NOT NULL, keyword TEXT NOT NULL, sent_at TIMESTAMPTZ DEFAULT NOW(), PRIMARY KEY (user_id, keyword))""")
         
+        # ✅ NEW: Reply Feedback Table for Telegram Review System
+        cur.execute("""CREATE TABLE IF NOT EXISTS reply_feedback (
+            id SERIAL PRIMARY KEY, reply_log_id INTEGER UNIQUE REFERENCES reply_logs(id) ON DELETE CASCADE,
+            feedback TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        
         cur.execute("""INSERT INTO system_config (key, value) VALUES ('bot_paused', 'false'), ('gemini_enabled', 'true'), ('safe_mode', 'false'), ('consecutive_429s', '0'), ('circuit_breaker_until', '0'), ('c2dm_enabled', 'true') ON CONFLICT DO NOTHING""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_reply_logs_created ON reply_logs(created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reply_logs_media ON reply_logs(media_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_conv_mem_user ON conversation_memory(user_id, created_at DESC)")
         logger.info("🚀 Enterprise DB initialized.")
 
+# ✅ FIX: KeyError:0 Solved (RealDictCursor returns dict, not tuple)
 def claim_event(event_id: str) -> bool:
     if not event_id: return False
     lock_id = int(hashlib.md5(event_id.encode()).hexdigest(), 16) % (2**31 - 1)
     with get_db() as cur:
         cur.execute("SELECT pg_try_advisory_xact_lock(%s) as locked", (lock_id,))
         row = cur.fetchone()
-        if not row or not row['locked']: return False
+        if not row or not row['locked']:
+            return False # Another worker is already processing this
         cur.execute("INSERT INTO processed_events (event_id) VALUES (%s) ON CONFLICT DO NOTHING", (event_id,))
         return cur.rowcount == 1
 
@@ -188,6 +199,7 @@ def claim_welcome_dm(user_id: str) -> bool:
         cur.execute("INSERT INTO dm_cooldowns (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
         return cur.rowcount == 1
 
+# ✅ FIX: Rolling 24-hour C2DM Cooldown (Prevents Meta Spam Ban)
 def claim_c2dm_dm(user_id: str, keyword: str, cooldown_hours: int = 24) -> bool:
     with get_db() as cur:
         cur.execute("""
@@ -243,9 +255,15 @@ def get_stats() -> dict:
             "circuit_breaker_active": is_circuit_breaker_active()
         }
 
+# ✅ FIX: SQL UNION ALL Syntax Error Solved
 def get_recent_activity(limit: int = 10) -> list:
     with get_db() as cur:
-        cur.execute("""SELECT action, created_at FROM (SELECT source AS action, created_at FROM reply_logs ORDER BY created_at DESC LIMIT 50) r UNION ALL SELECT 'Welcome DM' AS action, sent_at AS created_at FROM dm_cooldowns ORDER BY sent_at DESC LIMIT 10 ORDER BY created_at DESC LIMIT %s""", (limit,))
+        cur.execute("""
+            (SELECT source AS action, created_at FROM reply_logs ORDER BY created_at DESC LIMIT 50) 
+            UNION ALL 
+            (SELECT 'Welcome DM' AS action, sent_at AS created_at FROM dm_cooldowns ORDER BY sent_at DESC LIMIT 10) 
+            ORDER BY created_at DESC LIMIT %s
+        """, (limit,))
         return cur.fetchall()
 
 def cleanup_old_data():
@@ -257,6 +275,8 @@ def cleanup_old_data():
         cur.execute("DELETE FROM gemini_quotas WHERE usage_date < NOW() - INTERVAL '30 days'")
         cur.execute("DELETE FROM failed_webhooks WHERE created_at < NOW() - INTERVAL '30 days'")
         cur.execute("DELETE FROM conversation_summaries WHERE updated_at < NOW() - INTERVAL '90 days'")
+        cur.execute("DELETE FROM c2dm_cooldowns WHERE sent_at < NOW() - INTERVAL '30 days'")
+        cur.execute("DELETE FROM reply_feedback WHERE created_at < NOW() - INTERVAL '90 days'")
 
 def is_active_hours() -> bool:
     ist_hour = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).hour
@@ -318,3 +338,48 @@ def get_telegram_state(chat_id: str) -> dict | None:
         except Exception: pass
     return None
 def clear_telegram_state(chat_id: str): set_config(f"tg_state_{chat_id}", "")
+
+# ==========================================
+# ✅ NEW: Telegram Review System & Analytics
+# ==========================================
+
+def get_recent_ai_replies(limit: int = 5) -> list:
+    """Fetches recent AI-generated replies for the Telegram review system."""
+    with get_db() as cur:
+        cur.execute("""
+            SELECT id, event_id, user_id, reply_text, media_id, created_at 
+            FROM reply_logs 
+            WHERE source = 'comment' 
+              AND reply_text NOT LIKE 'Thank you%%' 
+              AND reply_text NOT LIKE 'Radhe Radhe%%'
+              AND reply_text NOT LIKE '🙏%%'
+              AND reply_text NOT LIKE '[Filtered Spam]'
+              AND reply_text NOT LIKE 'Glad you liked it%%'
+            ORDER BY created_at DESC LIMIT %s
+        """, (limit,))
+        return cur.fetchall()
+
+def save_reply_feedback(reply_log_id: int, feedback: str):
+    """Saves 👍 or 👎 feedback for a specific reply."""
+    with get_db() as cur:
+        cur.execute("""
+            INSERT INTO reply_feedback (reply_log_id, feedback) 
+            VALUES (%s, %s) 
+            ON CONFLICT (reply_log_id) DO UPDATE SET feedback = EXCLUDED.feedback
+        """, (reply_log_id, feedback))
+
+def update_reply_text(reply_log_id: int, new_text: str):
+    """Updates the reply text in the database (used when regenerating a reply from Telegram)."""
+    with get_db() as cur:
+        cur.execute("UPDATE reply_logs SET reply_text = %s WHERE id = %s", (new_text, reply_log_id))
+
+def get_top_posts(limit: int = 5) -> list:
+    """Analytics: Returns the top performing posts based on comment reply count."""
+    with get_db() as cur:
+        cur.execute("""
+            SELECT media_id, COUNT(*) as reply_count 
+            FROM reply_logs 
+            WHERE media_id IS NOT NULL AND media_id != '' AND source = 'comment'
+            GROUP BY media_id ORDER BY reply_count DESC LIMIT %s
+        """, (limit,))
+        return cur.fetchall()
