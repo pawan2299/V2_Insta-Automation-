@@ -40,7 +40,7 @@ def _clean_json_string(text: str) -> str:
     return text.strip()
 
 def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", image_url: str | None = None, response_schema: dict | None = None) -> str | None:
-    if task_type in ["spam", "dm_filter", "intent"]: 
+    if task_type in ["spam", "dm_filter", "intent", "summary"]: 
         models_to_try = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
     elif task_type == "dm": 
         models_to_try = ["gemini-3.5-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
@@ -235,6 +235,18 @@ def generate_weekly_insight(stats: dict) -> str | None:
     if not can_use_gemini(): return None
     prompt = f"Social media analyst for @krishna.verse.ai.\nThis week: {stats.get('total_comments_replied', 0)} replies, {stats.get('welcome_dms_sent', 0)} DMs.\nGive 3 practical growth suggestions. Under 100 words."
     return _generate(prompt, max_length=500, task_type="dm")
+
+# ✅ NEW: Semantic Summarization Function (Infinite Memory)
+def summarize_conversation(user_id: str, messages: list[dict]) -> str | None:
+    if not can_use_gemini(): return None
+    history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in messages])
+    prompt = (
+        "Summarize the following Instagram DM conversation in 2-3 sentences. "
+        "Capture the core intent, user's mood, and any specific questions asked. "
+        "Do not use greetings or filler words.\n\n"
+        f"Conversation:\n{history_str}\n\nSummary:"
+    )
+    return _generate(prompt, max_length=200, task_type="summary")
 
 def generate_festival_list(years: list[int]) -> list[dict] | None:
     if not can_use_gemini(): return None
