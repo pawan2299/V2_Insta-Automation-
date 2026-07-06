@@ -7,7 +7,6 @@ from config import SETTINGS
 import database as db
 import gemini_client as ai
 from festivals import get_upcoming_festivals
-from instagram_api import get_token_expiry_days
 
 logger = logging.getLogger(__name__)
 BASE_URL = f"https://api.telegram.org/bot{SETTINGS.telegram_bot_token}"
@@ -36,12 +35,12 @@ def _answer_callback(callback_query_id: str, text: str = ""):
     try: requests.post(f"{BASE_URL}/answerCallbackQuery", json={"callback_query_id": callback_query_id, "text": text}, timeout=10)
     except: pass
 
-# ✅ REMOVED: setup_mini_app, generate_weekly_chart, send_photo (Matplotlib cleanup)
+# ✅ REMOVED: setup_mini_app() function - No more web app dependency
 
 MAIN_MENU_BUTTONS = {"inline_keyboard": [
     [{"text": "📊 Status & Quotas", "callback_data": "menu_status"}],
-    [{"text": "📈 Top Posts & Review", "callback_data": "menu_analytics"}],
     [{"text": "🎉 Festivals & Ideas", "callback_data": "menu_festivals"}],
+    [{"text": "🧠 Review AI Replies", "callback_data": "menu_review"}],  # ✅ NEW: Dedicated review menu
     [{"text": "⚙️ System Controls", "callback_data": "menu_controls"}],
     [{"text": "🔑 Keywords & C2DM", "callback_data": "menu_ai"}]
 ]}
@@ -113,17 +112,9 @@ def handle_update(update: dict):
             logs = db.get_recent_activity()
             _send(chat_id, "📜 <b>Recent Activity:</b>\n" + "\n".join([f"• {l['action']} at {l['created_at'].strftime('%H:%M:%S')}" for l in logs]) if logs else "No activity.")
         elif cmd == "/ping": _send(chat_id, "🏓 <b>Pong</b>\nBot: Running\nDatabase: Connected\nTelegram: OK")
-        elif cmd == "/topposts": send_top_posts(chat_id)
-        elif cmd == "/review": send_ai_review(chat_id)
-        elif cmd == "/weekly-report":
-            stats = db.get_stats()
-            text = f"📊 <b>Weekly Performance</b>\nTotal Replies: {stats['total_comments_replied']}\nDMs: {stats['welcome_dms_sent']}"
-            insight = ai.generate_weekly_insight(stats)
-            if insight: text += f"\n\n💡 <b>Insights:</b>\n{insight}"
-            _send(chat_id, text)
-            db.cleanup_old_data()
+        elif cmd == "/review": send_ai_review(chat_id)  # ✅ UPDATED: Call refined function
         elif cmd == "/help":
-            _send(chat_id, "🦚 <b>Krishna Verse AI Help</b>\nUse /menu for the interactive dashboard.\n<b>Quick Commands:</b>\n/status — Live stats & Quotas\n/topposts — Best performing posts\n/review — Rate AI replies\n/pause — Stop bot\n/resume — Start bot\n/panic — Emergency stop\n/caption topic — Generate caption\n/festivals — Upcoming festivals\n/c2dm — Comment-to-DM setup\n/logs — Recent activity")
+            _send(chat_id, "🦚 <b>Krishna Verse AI Help</b>\nUse /menu for the interactive dashboard.\n<b>Quick Commands:</b>\n/status — Live stats & Quotas\n/pause — Stop bot\n/resume — Start bot\n/panic — Emergency stop\n/caption topic — Generate caption\n/festivals — Upcoming festivals\n/review — Review AI replies (individual messages)\n/c2dm — Comment-to-DM setup\n/logs — Recent activity")
         elif cmd == "/c2dm": show_c2dm_main_menu(chat_id)
     except Exception: logger.error(f"Telegram command failed:\n{traceback.format_exc()}")
 
@@ -135,7 +126,7 @@ def send_status_update(chat_id: str, msg_id: int = None):
     if stats['bot_paused']: state_str = "⏸ PAUSED"
     elif stats['safe_mode']: state_str = "🛡️ SAFE MODE"
     
-    # ✅ NEW: Token Expiry Info
+    from instagram_api import get_token_expiry_days
     ig_days = get_token_expiry_days("ig_user")
     page_days = get_token_expiry_days("page_access")
     ig_str = f"{ig_days} days" if ig_days and ig_days > 0 else ("Never" if ig_days == -1 else "❌ Invalid")
@@ -160,36 +151,67 @@ def send_status_update(chat_id: str, msg_id: int = None):
     if msg_id: _edit_message(chat_id, msg_id, text, reply_markup=back_btn)
     else: _send(chat_id, text, reply_markup=back_btn)
 
-# ✅ NEW: Per-Post Analytics
-def send_top_posts(chat_id: str, msg_id: int = None):
-    posts = db.get_top_posts(5)
-    text = "📈 <b>Top Performing Posts (By Replies)</b>\n\n"
-    if not posts:
-        text += "<i>No data yet.</i>"
-    else:
-        for i, p in enumerate(posts, 1):
-            text += f"{i}. <code>{p['media_id']}</code>\n   💬 <b>{p['reply_count']}</b> replies\n"
-    back_btn = {"inline_keyboard": [[{"text": "🔙 Back to Menu", "callback_data": "menu_main"}]]}
-    if msg_id: _edit_message(chat_id, msg_id, text, reply_markup=back_btn)
-    else: _send(chat_id, text, reply_markup=back_btn)
-
-# ✅ NEW: AI Feedback Loop
+# ✅ REFINED: Individual message-based review system
 def send_ai_review(chat_id: str, msg_id: int = None):
-    replies = db.get_recent_ai_replies(3)
-    text = "🧠 <b>AI Reply Review</b>\nRate the quality of recent AI replies:\n\n"
-    btns = []
+    """Send each AI reply as a separate message with individual feedback buttons"""
+    replies = db.get_recent_ai_replies(5)  # Get last 5 AI replies
+    
     if not replies:
-        text += "<i>No recent AI replies to review.</i>"
-    else:
-        for r in replies:
-            text += f"• <i>{r['reply_text'][:50]}...</i>\n"
-            btns.append([
-                {"text": "👍 Good", "callback_data": f"fb_good_{r['id']}"},
-                {"text": "👎 Bad", "callback_data": f"fb_bad_{r['id']}"}
-            ])
-    btns.append([{"text": "🔙 Back to Menu", "callback_data": "menu_main"}])
-    if msg_id: _edit_message(chat_id, msg_id, text, reply_markup={"inline_keyboard": btns})
-    else: _send(chat_id, text, reply_markup={"inline_keyboard": btns})
+        text = "🧠 <b>AI Reply Review</b>\n\n<i>No recent AI replies to review.</i>\n\nAll recent replies were keywords/emojis."
+        btns = {"inline_keyboard": [[{"text": "🔙 Back to Menu", "callback_data": "menu_main"}]]}
+        if msg_id: _edit_message(chat_id, msg_id, text, reply_markup=btns)
+        else: _send(chat_id, text, reply_markup=btns)
+        return
+    
+    # Send header message
+    header = f"🧠 <b>AI Reply Review</b>\n\nReviewing last {len(replies)} AI-generated replies.\nRate each one to help improve the AI quality."
+    header_btns = {"inline_keyboard": [[{"text": "🔙 Back to Menu", "callback_data": "menu_main"}]]}
+    if msg_id: _edit_message(chat_id, msg_id, header, reply_markup=header_btns)
+    else: _send(chat_id, header, reply_markup=header_btns)
+    
+    # Send each reply as individual message
+    for r in replies:
+        # Get the original comment if available
+        try:
+            with db.get_db() as cur:
+                cur.execute("""
+                    SELECT cm.text as comment_text 
+                    FROM conversation_memory cm 
+                    WHERE cm.user_id = (
+                        SELECT user_id FROM reply_logs WHERE id = %s
+                    )
+                    AND cm.role = 'user'
+                    ORDER BY cm.created_at DESC 
+                    LIMIT 1
+                """, (r['id'],))
+                comment_row = cur.fetchone()
+                original_comment = comment_row['comment_text'] if comment_row else "Comment not available"
+        except:
+            original_comment = "Comment not available"
+        
+        # Build individual message
+        msg_text = f"━━━━━━━━━━━━━━━━━━━━\n"
+        msg_text += f"💬 <b>Original Comment:</b>\n<i>{original_comment[:150]}{'...' if len(original_comment) > 150 else ''}</i>\n\n"
+        msg_text += f"🤖 <b>AI Reply:</b>\n<b>{r['reply_text']}</b>\n"
+        msg_text += f"━━━━━━━━━━━━━━━━━━━━"
+        
+        # Individual feedback buttons for this specific reply
+        btns = {
+            "inline_keyboard": [
+                [
+                    {"text": "👍 Good", "callback_data": f"fb_good_{r['id']}"},
+                    {"text": "👎 Bad", "callback_data": f"fb_bad_{r['id']}"},
+                    {"text": "🔄 Regenerate", "callback_data": f"fb_regen_{r['id']}"}
+                ]
+            ]
+        }
+        
+        _send(chat_id, msg_text, reply_markup=btns)
+    
+    # Send footer message
+    footer = "✅ <b>Review Complete</b>\n\nTap the buttons above each reply to provide feedback.\nThis helps train the AI for better responses."
+    footer_btns = {"inline_keyboard": [[{"text": "🔙 Back to Menu", "callback_data": "menu_main"}]]}
+    _send(chat_id, footer, reply_markup=footer_btns)
 
 def send_festivals_update(chat_id: str, msg_id: int = None):
     upcoming = get_upcoming_festivals(days_ahead=30)
@@ -208,25 +230,48 @@ def handle_callback_query(query: dict):
     if chat_id != SETTINGS.telegram_chat_id: _answer_callback(query_id, "Unauthorized"); return
     _answer_callback(query_id, "Loading...")
     
-    # ✅ NEW: Feedback Handlers
+    # ✅ REFINED: Individual feedback handlers
     if data.startswith("fb_good_"):
         log_id = int(data.split("_")[2])
         db.save_reply_feedback(log_id, "good")
-        _edit_message(chat_id, msg_id, "✅ Marked as Good! AI will learn from this.")
+        _edit_message(chat_id, msg_id, "✅ <b>Marked as Good!</b>\n\nThis reply will be used as a positive example for AI training.")
         return
     elif data.startswith("fb_bad_"):
         log_id = int(data.split("_")[2])
         db.save_reply_feedback(log_id, "bad")
-        _edit_message(chat_id, msg_id, "❌ Marked as Bad. I will adjust the prompts.")
+        _edit_message(chat_id, msg_id, "❌ <b>Marked as Bad!</b>\n\nI'll adjust the prompts to avoid similar replies in the future.")
+        return
+    elif data.startswith("fb_regen_"):
+        log_id = int(data.split("_")[2])
+        # Get the original comment and regenerate
+        try:
+            with db.get_db() as cur:
+                cur.execute("""
+                    SELECT cm.text as comment_text, rl.media_id
+                    FROM conversation_memory cm
+                    JOIN reply_logs rl ON rl.user_id = cm.user_id
+                    WHERE rl.id = %s AND cm.role = 'user'
+                    ORDER BY cm.created_at DESC
+                    LIMIT 1
+                """, (log_id,))
+                row = cur.fetchone()
+                if row:
+                    new_reply = ai.generate_reply(row['comment_text'], post_caption="", image_url=None)
+                    if new_reply:
+                        db.update_reply_text(log_id, new_reply)
+                        _edit_message(chat_id, msg_id, f"🔄 <b>Regenerated!</b>\n\nNew reply: <b>{new_reply}</b>")
+                    else:
+                        _edit_message(chat_id, msg_id, "❌ Failed to regenerate. AI is currently unavailable.")
+                else:
+                    _edit_message(chat_id, msg_id, "❌ Original comment not found.")
+        except Exception as e:
+            logger.error(f"Regeneration failed: {e}")
+            _edit_message(chat_id, msg_id, "❌ Error during regeneration.")
         return
 
     if data == "menu_main": _edit_message(chat_id, msg_id, "🦚 <b>Krishna Verse AI</b>", reply_markup=MAIN_MENU_BUTTONS)
     elif data == "menu_status": send_status_update(chat_id, msg_id)
-    elif data == "menu_analytics":
-        btns = {"inline_keyboard": [[{"text": "📈 Top Posts", "callback_data": "analytics_top"}], [{"text": "🧠 Review AI", "callback_data": "analytics_review"}], [{"text": "🔙 Back", "callback_data": "menu_main"}]]}
-        _edit_message(chat_id, msg_id, "📊 <b>Analytics</b>", reply_markup=btns)
-    elif data == "analytics_top": send_top_posts(chat_id, msg_id)
-    elif data == "analytics_review": send_ai_review(chat_id, msg_id)
+    elif data == "menu_review": send_ai_review(chat_id, msg_id)  # ✅ NEW: Review menu option
     elif data == "menu_festivals": send_festivals_update(chat_id, msg_id)
     elif data == "menu_controls":
         controls = {"inline_keyboard": [[{"text": "⏸ Pause", "callback_data": "ctrl_pause"}, {"text": "▶️ Resume", "callback_data": "ctrl_resume"}], [{"text": "🚨 Panic", "callback_data": "ctrl_panic"}], [{"text": "🔙 Back", "callback_data": "menu_main"}]]}
@@ -282,13 +327,16 @@ def check_and_send_token_expiry_alert():
         ist_today = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date()
         if db.get_config("last_token_expiry_check") == str(ist_today): return
         db.set_config("last_token_expiry_check", str(ist_today))
+        from instagram_api import get_token_expiry_days
         days_left = get_token_expiry_days("ig_user")
         if days_left is not None and days_left != -1 and days_left <= 7:
             _send(SETTINGS.telegram_chat_id, f"🚨 <b>Meta API Token Expiring in {days_left} days!</b>")
     except Exception as e: logger.error(f"Token check failed: {e}")
 
 def register_telegram_webhook():
-    try: requests.post(f"{BASE_URL}/setWebhook", json={"url": f"{SETTINGS.public_base_url}/telegram-webhook"}, timeout=10)
+    try: 
+        requests.post(f"{BASE_URL}/setWebhook", json={"url": f"{SETTINGS.public_base_url}/telegram-webhook"}, timeout=10)
+        # ✅ REMOVED: setup_mini_app() call - No more web app
     except: pass
 
 def get_webhook_info() -> dict:
@@ -298,7 +346,7 @@ def get_webhook_info() -> dict:
 def show_c2dm_main_menu(chat_id: str, msg_id: int = None):
     db.clear_telegram_state(chat_id)
     status = "🟢 Active" if db.is_c2dm_enabled() else "🔴 Paused"
-    btns = {"inline_keyboard": [[{"text": "➕ Add", "callback_data": "c2dm_add"}], [{"text": "📋 List", "callback_data": "c2dm_list"}], [{"text": f"⚙️ Toggle ({status})", "callback_data": "c2dm_toggle"}], [{"text": "🔙 Back", "callback_data": "menu_ai"}]]}
+    btns = {"inline_keyboard": [[{"text": "➕ Add", "callback_data": "c2dm_add"}], [{"text": "📋 List", "callback_data": "c2dm_list"}], [{"text": f"⚙️ Toggle ({status})", "callback_data": "c2dm_toggle"}], [{"text": "🔙 Back", "callback_data": "menu_main"}]]}
     if msg_id: _edit_message(chat_id, msg_id, f"🌸 <b>C2DM Setup</b>\nStatus: {status}", reply_markup=btns)
     else: _send(chat_id, f"🌸 <b>C2DM Setup</b>\nStatus: {status}", reply_markup=btns)
 
