@@ -2,13 +2,12 @@ from __future__ import annotations
 import logging
 import requests
 import traceback
-import io
-import matplotlib.pyplot as plt
 from datetime import datetime, timezone, timedelta
 from config import SETTINGS
 import database as db
 import gemini_client as ai
 from festivals import get_upcoming_festivals
+from instagram_api import get_token_expiry_days
 
 logger = logging.getLogger(__name__)
 BASE_URL = f"https://api.telegram.org/bot{SETTINGS.telegram_bot_token}"
@@ -37,58 +36,14 @@ def _answer_callback(callback_query_id: str, text: str = ""):
     try: requests.post(f"{BASE_URL}/answerCallbackQuery", json={"callback_query_id": callback_query_id, "text": text}, timeout=10)
     except: pass
 
-# ✅ NEW: Send Photo (For Weekly Charts)
-def send_photo(chat_id: str, photo_bytes: bytes, caption: str = ""):
-    try:
-        requests.post(f"{BASE_URL}/sendPhoto", 
-                      data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
-                      files={"photo": ("chart.png", photo_bytes, "image/png")}, timeout=20)
-    except Exception as e: logger.error(f"Send photo failed: {e}")
-
-# ✅ NEW: Generate Dark-Themed Weekly Chart
-def generate_weekly_chart() -> bytes:
-    with db.get_db() as cur:
-        cur.execute("""
-            SELECT DATE(created_at) as day, COUNT(*) as count 
-            FROM reply_logs WHERE created_at >= NOW() - INTERVAL '7 days' 
-            GROUP BY DATE(created_at) ORDER BY day ASC
-        """)
-        rows = cur.fetchall()
-    
-    days = [r['day'].strftime('%a') for r in rows]
-    counts = [r['count'] for r in rows]
-    
-    plt.style.use('dark_background')
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(days, counts, color='#ff9933', marker='o', linestyle='-', linewidth=2, markersize=8)
-    ax.set_facecolor('#0a0a0c')
-    fig.patch.set_facecolor('#0a0a0c')
-    ax.set_title('Weekly Engagement', color='#d4af37', fontsize=16, fontweight='bold')
-    ax.grid(color='#2a2a35', linestyle='--', alpha=0.7)
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight')
-    plt.close()
-    buf.seek(0)
-    return buf.getvalue()
-
-# ✅ NEW: Telegram Mini App Setup
-def setup_mini_app():
-    try:
-        requests.post(f"{BASE_URL}/setChatMenuButton", json={
-            "menu_button": {
-                "type": "web_app",
-                "text": "📊 Open Dashboard",
-                "web_app": {"url": f"{SETTINGS.public_base_url}/"}
-            }
-        }, timeout=10)
-    except Exception as e: logger.error(f"Mini app setup failed: {e}")
+# ✅ REMOVED: setup_mini_app, generate_weekly_chart, send_photo (Matplotlib cleanup)
 
 MAIN_MENU_BUTTONS = {"inline_keyboard": [
     [{"text": "📊 Status & Quotas", "callback_data": "menu_status"}],
+    [{"text": "📈 Top Posts & Review", "callback_data": "menu_analytics"}],
     [{"text": "🎉 Festivals & Ideas", "callback_data": "menu_festivals"}],
     [{"text": "⚙️ System Controls", "callback_data": "menu_controls"}],
-    [{"text": "🔑 Keywords & AI", "callback_data": "menu_ai"}]
+    [{"text": "🔑 Keywords & C2DM", "callback_data": "menu_ai"}]
 ]}
 
 def handle_update(update: dict):
@@ -149,21 +104,26 @@ def handle_update(update: dict):
         elif cmd == "/caption":
             _send(chat_id, "⏳ Generating..."); cap = ai.generate_caption(" ".join(args)); _send(chat_id, cap or "❌ Failed.")
         elif cmd == "/setsleep":
-            s, e = int(args[0]), int(args[1]); db.set_config("sleep_start", str(s)); db.set_config("sleep_end", str(e))
-            _send(chat_id, f"✅ Sleep hours set: {s}:00 to {e}:00 IST")
+            try:
+                s, e = int(args[0]), int(args[1]); db.set_config("sleep_start", str(s)); db.set_config("sleep_end", str(e))
+                _send(chat_id, f"✅ Sleep hours set: {s}:00 to {e}:00 IST")
+            except (ValueError, IndexError):
+                _send(chat_id, "❌ Usage: <code>/setsleep 1 6</code> (Start hour, End hour)")
         elif cmd == "/logs":
             logs = db.get_recent_activity()
             _send(chat_id, "📜 <b>Recent Activity:</b>\n" + "\n".join([f"• {l['action']} at {l['created_at'].strftime('%H:%M:%S')}" for l in logs]) if logs else "No activity.")
         elif cmd == "/ping": _send(chat_id, "🏓 <b>Pong</b>\nBot: Running\nDatabase: Connected\nTelegram: OK")
+        elif cmd == "/topposts": send_top_posts(chat_id)
+        elif cmd == "/review": send_ai_review(chat_id)
         elif cmd == "/weekly-report":
-            _send(chat_id, "⏳ Generating visual report...")
-            chart_bytes = generate_weekly_chart()
             stats = db.get_stats()
-            caption = f"📊 <b>Weekly Performance</b>\nTotal Replies: {stats['total_comments_replied']}"
-            send_photo(chat_id, chart_bytes, caption)
+            text = f"📊 <b>Weekly Performance</b>\nTotal Replies: {stats['total_comments_replied']}\nDMs: {stats['welcome_dms_sent']}"
+            insight = ai.generate_weekly_insight(stats)
+            if insight: text += f"\n\n💡 <b>Insights:</b>\n{insight}"
+            _send(chat_id, text)
             db.cleanup_old_data()
         elif cmd == "/help":
-            _send(chat_id, "🦚 <b>Krishna Verse AI Help</b>\nUse /menu for the interactive dashboard.\n<b>Quick Commands:</b>\n/status — Live stats & Quotas\n/pause — Stop bot\n/resume — Start bot\n/panic — Emergency stop\n/caption topic — Generate caption\n/festivals — Upcoming festivals\n/c2dm — Comment-to-DM setup\n/logs — Recent activity\n/weekly-report — Visual chart")
+            _send(chat_id, "🦚 <b>Krishna Verse AI Help</b>\nUse /menu for the interactive dashboard.\n<b>Quick Commands:</b>\n/status — Live stats & Quotas\n/topposts — Best performing posts\n/review — Rate AI replies\n/pause — Stop bot\n/resume — Start bot\n/panic — Emergency stop\n/caption topic — Generate caption\n/festivals — Upcoming festivals\n/c2dm — Comment-to-DM setup\n/logs — Recent activity")
         elif cmd == "/c2dm": show_c2dm_main_menu(chat_id)
     except Exception: logger.error(f"Telegram command failed:\n{traceback.format_exc()}")
 
@@ -174,9 +134,20 @@ def send_status_update(chat_id: str, msg_id: int = None):
     state_str = "🟢 RUNNING"
     if stats['bot_paused']: state_str = "⏸ PAUSED"
     elif stats['safe_mode']: state_str = "🛡️ SAFE MODE"
+    
+    # ✅ NEW: Token Expiry Info
+    ig_days = get_token_expiry_days("ig_user")
+    page_days = get_token_expiry_days("page_access")
+    ig_str = f"{ig_days} days" if ig_days and ig_days > 0 else ("Never" if ig_days == -1 else "❌ Invalid")
+    page_str = f"{page_days} days" if page_days and page_days > 0 else ("Never" if page_days == -1 else "❌ Invalid")
+
     text = f"📊 <b>Bot Status:</b> {state_str}\n🤖 <b>Gemini:</b> {'🟢 ON' if stats['gemini_enabled'] else '⚪ OFF'}\n"
-    text += f"🚨 <b>Circuit Breaker:</b> {'ACTIVE' if stats['circuit_breaker_active'] else '🟢 OK'}\n📈 <b>Total Calls Today:</b> {gemini_count}\n"
+    text += f"🚨 <b>Circuit Breaker:</b> {'ACTIVE' if stats['circuit_breaker_active'] else '🟢 OK'}\n"
+    text += f"🔑 <b>IG Token Expiry:</b> {ig_str}\n"
+    text += f"🔑 <b>Page Token Expiry:</b> {page_str}\n"
+    text += f"📈 <b>Total Calls Today:</b> {gemini_count}\n"
     text += "<b>🤖 Gemini Quotas (Today)</b>\n"
+    
     total_pool = len(_clients) if _clients else 1
     for m in MODEL_CONFIGS:
         used = db.get_model_rpd(m["id"])
@@ -184,9 +155,41 @@ def send_status_update(chat_id: str, msg_id: int = None):
         bar = _make_progress_bar(used, limit)
         text += f"<code>{bar}</code> {m['label']}\n{used} / {limit} requests\n"
     text += f"💌 <b>Replies (24h):</b> {stats['last_24h_replies']}"
+    
     back_btn = {"inline_keyboard": [[{"text": "🔙 Back to Menu", "callback_data": "menu_main"}]]}
     if msg_id: _edit_message(chat_id, msg_id, text, reply_markup=back_btn)
     else: _send(chat_id, text, reply_markup=back_btn)
+
+# ✅ NEW: Per-Post Analytics
+def send_top_posts(chat_id: str, msg_id: int = None):
+    posts = db.get_top_posts(5)
+    text = "📈 <b>Top Performing Posts (By Replies)</b>\n\n"
+    if not posts:
+        text += "<i>No data yet.</i>"
+    else:
+        for i, p in enumerate(posts, 1):
+            text += f"{i}. <code>{p['media_id']}</code>\n   💬 <b>{p['reply_count']}</b> replies\n"
+    back_btn = {"inline_keyboard": [[{"text": "🔙 Back to Menu", "callback_data": "menu_main"}]]}
+    if msg_id: _edit_message(chat_id, msg_id, text, reply_markup=back_btn)
+    else: _send(chat_id, text, reply_markup=back_btn)
+
+# ✅ NEW: AI Feedback Loop
+def send_ai_review(chat_id: str, msg_id: int = None):
+    replies = db.get_recent_ai_replies(3)
+    text = "🧠 <b>AI Reply Review</b>\nRate the quality of recent AI replies:\n\n"
+    btns = []
+    if not replies:
+        text += "<i>No recent AI replies to review.</i>"
+    else:
+        for r in replies:
+            text += f"• <i>{r['reply_text'][:50]}...</i>\n"
+            btns.append([
+                {"text": "👍 Good", "callback_data": f"fb_good_{r['id']}"},
+                {"text": "👎 Bad", "callback_data": f"fb_bad_{r['id']}"}
+            ])
+    btns.append([{"text": "🔙 Back to Menu", "callback_data": "menu_main"}])
+    if msg_id: _edit_message(chat_id, msg_id, text, reply_markup={"inline_keyboard": btns})
+    else: _send(chat_id, text, reply_markup={"inline_keyboard": btns})
 
 def send_festivals_update(chat_id: str, msg_id: int = None):
     upcoming = get_upcoming_festivals(days_ahead=30)
@@ -204,14 +207,32 @@ def handle_callback_query(query: dict):
     data = query["data"]; query_id = query["id"]
     if chat_id != SETTINGS.telegram_chat_id: _answer_callback(query_id, "Unauthorized"); return
     _answer_callback(query_id, "Loading...")
+    
+    # ✅ NEW: Feedback Handlers
+    if data.startswith("fb_good_"):
+        log_id = int(data.split("_")[2])
+        db.save_reply_feedback(log_id, "good")
+        _edit_message(chat_id, msg_id, "✅ Marked as Good! AI will learn from this.")
+        return
+    elif data.startswith("fb_bad_"):
+        log_id = int(data.split("_")[2])
+        db.save_reply_feedback(log_id, "bad")
+        _edit_message(chat_id, msg_id, "❌ Marked as Bad. I will adjust the prompts.")
+        return
+
     if data == "menu_main": _edit_message(chat_id, msg_id, "🦚 <b>Krishna Verse AI</b>", reply_markup=MAIN_MENU_BUTTONS)
     elif data == "menu_status": send_status_update(chat_id, msg_id)
+    elif data == "menu_analytics":
+        btns = {"inline_keyboard": [[{"text": "📈 Top Posts", "callback_data": "analytics_top"}], [{"text": "🧠 Review AI", "callback_data": "analytics_review"}], [{"text": "🔙 Back", "callback_data": "menu_main"}]]}
+        _edit_message(chat_id, msg_id, "📊 <b>Analytics</b>", reply_markup=btns)
+    elif data == "analytics_top": send_top_posts(chat_id, msg_id)
+    elif data == "analytics_review": send_ai_review(chat_id, msg_id)
     elif data == "menu_festivals": send_festivals_update(chat_id, msg_id)
     elif data == "menu_controls":
         controls = {"inline_keyboard": [[{"text": "⏸ Pause", "callback_data": "ctrl_pause"}, {"text": "▶️ Resume", "callback_data": "ctrl_resume"}], [{"text": "🚨 Panic", "callback_data": "ctrl_panic"}], [{"text": "🔙 Back", "callback_data": "menu_main"}]]}
         _edit_message(chat_id, msg_id, "⚙️ <b>System Controls</b>", reply_markup=controls)
     elif data == "menu_ai":
-        ai_btns = {"inline_keyboard": [[{"text": "✨ AI On", "callback_data": "ctrl_ai_on"}, {"text": "⚪ AI Off", "callback_data": "ctrl_ai_off"}], [{"text": "🔙 Back", "callback_data": "menu_main"}]]}
+        ai_btns = {"inline_keyboard": [[{"text": "✨ AI On", "callback_data": "ctrl_ai_on"}, {"text": "⚪ AI Off", "callback_data": "ctrl_ai_off"}], [{"text": "💌 C2DM Setup", "callback_data": "c2dm_menu"}], [{"text": "🔙 Back", "callback_data": "menu_main"}]]}
         _edit_message(chat_id, msg_id, "🤖 <b>AI & Keywords</b>", reply_markup=ai_btns)
     elif data == "ctrl_pause": db.set_config("bot_paused", "true"); send_status_update(chat_id, msg_id)
     elif data == "ctrl_resume": db.set_config("bot_paused", "false"); db.set_config("safe_mode", "false"); send_status_update(chat_id, msg_id)
@@ -261,16 +282,13 @@ def check_and_send_token_expiry_alert():
         ist_today = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date()
         if db.get_config("last_token_expiry_check") == str(ist_today): return
         db.set_config("last_token_expiry_check", str(ist_today))
-        from instagram_api import get_token_expiry_days
         days_left = get_token_expiry_days("ig_user")
         if days_left is not None and days_left != -1 and days_left <= 7:
             _send(SETTINGS.telegram_chat_id, f"🚨 <b>Meta API Token Expiring in {days_left} days!</b>")
     except Exception as e: logger.error(f"Token check failed: {e}")
 
 def register_telegram_webhook():
-    try: 
-        requests.post(f"{BASE_URL}/setWebhook", json={"url": f"{SETTINGS.public_base_url}/telegram-webhook"}, timeout=10)
-        setup_mini_app() # ✅ NEW: Set Menu Button
+    try: requests.post(f"{BASE_URL}/setWebhook", json={"url": f"{SETTINGS.public_base_url}/telegram-webhook"}, timeout=10)
     except: pass
 
 def get_webhook_info() -> dict:
@@ -280,7 +298,7 @@ def get_webhook_info() -> dict:
 def show_c2dm_main_menu(chat_id: str, msg_id: int = None):
     db.clear_telegram_state(chat_id)
     status = "🟢 Active" if db.is_c2dm_enabled() else "🔴 Paused"
-    btns = {"inline_keyboard": [[{"text": "➕ Add", "callback_data": "c2dm_add"}], [{"text": "📋 List", "callback_data": "c2dm_list"}], [{"text": f"⚙️ Toggle ({status})", "callback_data": "c2dm_toggle"}], [{"text": "🔙 Back", "callback_data": "menu_main"}]]}
+    btns = {"inline_keyboard": [[{"text": "➕ Add", "callback_data": "c2dm_add"}], [{"text": "📋 List", "callback_data": "c2dm_list"}], [{"text": f"⚙️ Toggle ({status})", "callback_data": "c2dm_toggle"}], [{"text": "🔙 Back", "callback_data": "menu_ai"}]]}
     if msg_id: _edit_message(chat_id, msg_id, f"🌸 <b>C2DM Setup</b>\nStatus: {status}", reply_markup=btns)
     else: _send(chat_id, f"🌸 <b>C2DM Setup</b>\nStatus: {status}", reply_markup=btns)
 
