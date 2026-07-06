@@ -12,7 +12,7 @@ from database import (init_db, is_safe_mode, set_config, get_config, get_stats,
                       get_recent_activity, list_keywords, get_model_rpd, cleanup_old_data, 
                       get_failed_webhooks, delete_failed_webhook, start_db_keepalive, is_bot_paused)
 from security import verify_signature
-from bot_logic import handle_comment, handle_dm, handle_new_follower
+from bot_logic import handle_comment, handle_dm
 from telegram_bot import handle_update, _send, get_webhook_info, register_telegram_webhook, check_and_send_festival_reminders, check_and_send_token_expiry_alert
 from instagram_api import check_token_validity
 import psutil
@@ -22,23 +22,21 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__, template_folder='templates')
 
-# ✅ UPDATED: ThreadPool reduced to 5
+# ✅ FIX: ThreadPool reduced to 5 to match DB connections
 executor = ThreadPoolExecutor(max_workers=5)
 
-# ✅ NEW: In-Memory Metrics (Ring Buffer)
 webhook_metrics = deque(maxlen=100)
 error_metrics = deque(maxlen=100)
 _reply_counts = []
 _reply_lock = threading.Lock()
 MAX_REPLIES_PER_MINUTE = 20
 
-# ✅ NEW: Memory Usage Monitor
 def start_memory_monitor():
     def monitor():
         while True:
             time.sleep(60)
             mem = psutil.virtual_memory().percent
-            if mem > 85: # Render limit is 512MB, 85% is safe threshold
+            if mem > 85: 
                 _send(SETTINGS.telegram_chat_id, f"🚨 <b>High Memory Alert!</b>\nUsage: {mem}%")
     threading.Thread(target=monitor, daemon=True).start()
 
@@ -57,14 +55,21 @@ def _check_rate_limit() -> bool:
 def _startup():
     try:
         init_db()
-        start_db_keepalive() # ✅ NEW: Start DB Ping
-        start_memory_monitor() # ✅ NEW: Start Memory Monitor
+        start_db_keepalive()
+        start_memory_monitor()
         register_telegram_webhook()
+        
+        # ✅ FIX: Moved heavy checks out of webhook, run once on startup
+        check_and_send_festival_reminders()
+        check_and_send_token_expiry_alert()
+        
         ig_valid = check_token_validity("ig_user")
         page_valid = check_token_validity("page_access")
         wh_url = get_webhook_info().get("result", {}).get("url", "None")
-        _send(SETTINGS.telegram_chat_id, f"🦚 <b>Krishna Bot V4.0 Enterprise Startup</b>\nIG: {'✅' if ig_valid else '❌'}\nPage: {'✅' if page_valid else '❌'}\nTG Webhook: <code>{wh_url}</code>")
-    except Exception as e: logger.critical(f"Startup failed: {e}"); sys.exit(1)
+        _send(SETTINGS.telegram_chat_id, f"🦚 <b>Krishna Bot V5.0 Enterprise Startup</b>\nIG: {'✅' if ig_valid else '❌'}\nPage: {'✅' if page_valid else '❌'}\nTG Webhook: <code>{wh_url}</code>")
+    except Exception as e: 
+        logger.critical(f"❌ Startup failed: {e}")
+        sys.exit(1)
 
 _startup()
 
@@ -76,9 +81,8 @@ def wake_up():
 
 @app.get("/")
 def health():
-    return render_template("dashboard.html") # ✅ Serve Premium Dashboard
+    return render_template("dashboard.html")
 
-# ✅ NEW: Dashboard API Endpoints
 @app.get("/api/stats")
 def api_stats():
     stats = get_stats()
@@ -104,7 +108,6 @@ def api_panic():
     set_config("safe_mode", "true"); set_config("gemini_enabled", "false")
     return jsonify({"status": "ok"})
 
-# ✅ NEW: Server-Sent Events (SSE) for Live Dashboard Metrics
 @app.get("/stream")
 def stream():
     def event_stream():
@@ -112,7 +115,6 @@ def stream():
             time.sleep(2)
             avg_latency = sum(webhook_metrics) / len(webhook_metrics) * 1000 if webhook_metrics else 0
             error_rate = (sum(error_metrics) / len(error_metrics) * 100) if error_metrics else 0
-            
             from gemini_client import MODEL_CONFIGS, _clients
             models = []
             total_pool = len(_clients) if _clients else 1
@@ -120,7 +122,6 @@ def stream():
                 used = get_model_rpd(m["id"])
                 limit = m["rpd"] * total_pool
                 models.append({"label": m["label"], "used": used, "limit": limit})
-                
             yield f"data: {json.dumps({'latency': avg_latency, 'error_rate': error_rate, 'models': models})}\n\n"
     return Response(event_stream(), mimetype='text/event-stream')
 
@@ -140,10 +141,9 @@ def webhook():
     is_error = False
     
     def process():
-        nonlocal is_error, event_count  # <--- बस यहाँ event_count add कर दिया
+        nonlocal is_error, event_count  # ✅ FIX: Added event_count to nonlocal (Solves UnboundLocalError)
         try:
-            check_and_send_festival_reminders()
-            check_and_send_token_expiry_alert()
+            # ✅ FIX: Removed heavy festival/token checks from here to save DB hits on every comment
             if not _check_rate_limit(): return
             
             for entry in data.get("entry", []):
@@ -151,28 +151,25 @@ def webhook():
                 event_count += len(entry.get("changes", []))
                 for msg in entry.get("messaging", []): handle_dm(msg)
                 for change in entry.get("changes", []):
-                    if change.get("field") == "comments": handle_comment(change.get("value", {}))
-                    elif change.get("field") == "follows": handle_new_follower(change.get("value", {}).get("id", ""))
+                    if change.get("field") == "comments": 
+                        handle_comment(change.get("value", {}))
+                    # ✅ FIX: Removed 'follows' trigger to prevent Meta Policy violations & API waste
         except Exception as e:
             is_error = True
-            logger.error(f"Webhook processing error: {e}")
+            logger.error(f"❌ Webhook processing error: {e}")
         finally:
-            # ✅ NEW: Record Metrics
             webhook_metrics.append(time.time() - start_time)
             error_metrics.append(1 if is_error else 0)
             processing_time = time.time() - start_time
-            queue_depth = executor._work_queue.qsize() if hasattr(executor, '_work_queue') else -1
-            logger.info(f"✅ Webhook processed: {event_count} events in {processing_time:.2f}s | Queue Depth: {queue_depth}")
+            logger.info(f"✅ Webhook processed: {event_count} events in {processing_time:.2f}s")
 
     executor.submit(process)
     return "OK", 200
 
-# ✅ NEW: Retry Failed Webhooks Endpoint
 @app.post("/retry-failed-webhooks")
 def retry_failed():
     failed = get_failed_webhooks(10)
     if not failed: return jsonify({"message": "No failed webhooks found."})
-    
     success_count = 0
     for row in failed:
         try:
@@ -182,8 +179,7 @@ def retry_failed():
             delete_failed_webhook(row['event_id'])
             success_count += 1
         except Exception as e:
-            logger.error(f"Retry failed for {row['event_id']}: {e}")
-            
+            logger.error(f"❌ Retry failed for {row['event_id']}: {e}")
     return jsonify({"message": f"Retried {success_count} webhooks."})
 
 @app.post("/telegram-webhook")
