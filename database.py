@@ -24,12 +24,11 @@ def init_pool(force: bool = False):
             except Exception: pass
             _pool = None
         try:
-            # ✅ UPDATED: maxconn reduced from 8 to 4 to prevent Render OOM/Connection limits
             _pool = pool.ThreadedConnectionPool(
                 minconn=1, maxconn=6, dsn=SETTINGS.database_url,
                 cursor_factory=RealDictCursor, connect_timeout=20,
             )
-            logger.info("DB pool initialized (maxconn=4).")
+            logger.info("DB pool initialized (maxconn=6).")
         except Exception as e:
             logger.error(f"Failed to initialize DB pool: {e}")
             _pool = None
@@ -43,9 +42,7 @@ def get_db():
         if _pool is None or getattr(_pool, 'closed', False):
             logger.warning("DB pool closed. Reinitializing...")
             init_pool(force=True)
-        
         conn = _pool.getconn()
-        # ✅ Health Check: Verify connection is alive before yielding
         try:
             with conn.cursor() as test_cur: test_cur.execute("SELECT 1")
         except (psycopg2.OperationalError, psycopg2.InterfaceError):
@@ -55,10 +52,6 @@ def get_db():
             conn = None
             init_pool(force=True)
             conn = _pool.getconn()
-        except Exception as e:
-            logger.error(f"Unexpected error during connection health check: {e}")
-            raise
-            
         with conn.cursor() as cur: yield cur
         conn.commit()
     except Exception:
@@ -83,42 +76,47 @@ def init_db():
         cur.execute("""CREATE TABLE IF NOT EXISTS comment_to_dm (id SERIAL PRIMARY KEY, keyword TEXT UNIQUE NOT NULL, public_reply TEXT NOT NULL, dm_message TEXT NOT NULL, is_active BOOLEAN DEFAULT TRUE, created_at TIMESTAMPTZ DEFAULT NOW())""")
         cur.execute("""CREATE TABLE IF NOT EXISTS dm_cooldowns (user_id TEXT PRIMARY KEY, sent_at TIMESTAMPTZ DEFAULT NOW())""")
         cur.execute("""CREATE TABLE IF NOT EXISTS human_handoff_cooldowns (user_id TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL)""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS failed_webhooks (event_id TEXT PRIMARY KEY, payload JSONB NOT NULL, error_msg TEXT, retry_count INTEGER DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW())""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS conversation_summaries (user_id TEXT PRIMARY KEY, summary TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS c2dm_cooldowns (user_id TEXT NOT NULL, keyword TEXT NOT NULL, sent_at TIMESTAMPTZ DEFAULT NOW(), PRIMARY KEY (user_id, keyword))""")
         
-        # ✅ NEW: Dead Letter Queue & Infinite Memory Tables
-        cur.execute("""CREATE TABLE IF NOT EXISTS failed_webhooks (
-            event_id TEXT PRIMARY KEY, payload JSONB NOT NULL, error_msg TEXT, 
-            retry_count INTEGER DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW()
-        )""")
-        cur.execute("""CREATE TABLE IF NOT EXISTS conversation_summaries (
-            user_id TEXT PRIMARY KEY, summary TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW()
+        # ✅ NEW: Reply Feedback Table for A/B Testing
+        cur.execute("""CREATE TABLE IF NOT EXISTS reply_feedback (
+            id SERIAL PRIMARY KEY, reply_log_id INTEGER UNIQUE REFERENCES reply_logs(id) ON DELETE CASCADE,
+            feedback TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW()
         )""")
         
         cur.execute("""INSERT INTO system_config (key, value) VALUES ('bot_paused', 'false'), ('gemini_enabled', 'true'), ('safe_mode', 'false'), ('consecutive_429s', '0'), ('circuit_breaker_until', '0'), ('c2dm_enabled', 'true') ON CONFLICT DO NOTHING""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_reply_logs_created ON reply_logs(created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reply_logs_media ON reply_logs(media_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_conv_mem_user ON conversation_memory(user_id, created_at DESC)")
-        logger.info("🚀 Enterprise DB initialized with DLQ & Summaries.")
+        logger.info("🚀 Enterprise DB initialized.")
 
-# ✅ NEW: Advisory Locks for Zero-Duplicate Webhooks
 def claim_event(event_id: str) -> bool:
     if not event_id: return False
     lock_id = int(hashlib.md5(event_id.encode()).hexdigest(), 16) % (2**31 - 1)
     with get_db() as cur:
-        # ✅ FIX: RealDictCursor returns a dict, so we use an alias 'locked' and access it by key name
         cur.execute("SELECT pg_try_advisory_xact_lock(%s) as locked", (lock_id,))
         row = cur.fetchone()
-        if not row or not row['locked']:
-            return False # Another worker is already processing this
+        if not row or not row['locked']: return False
         cur.execute("INSERT INTO processed_events (event_id) VALUES (%s) ON CONFLICT DO NOTHING", (event_id,))
         return cur.rowcount == 1
 
-# ✅ NEW: Dead Letter Queue (DLQ) Functions
 def save_failed_webhook(event_id: str, payload: dict, error_msg: str):
     with get_db() as cur:
+        cur.execute("""INSERT INTO failed_webhooks (event_id, payload, error_msg) VALUES (%s, %s, %s) ON CONFLICT (event_id) DO UPDATE SET error_msg = EXCLUDED.error_msg, retry_count = failed_webhooks.retry_count + 1""", (event_id, json.dumps(payload), error_msg))
+
+# ✅ NEW: Auto-Retry Queue Fetcher
+def get_and_lock_failed_webhooks(limit=5):
+    with get_db() as cur:
         cur.execute("""
-            INSERT INTO failed_webhooks (event_id, payload, error_msg) 
-            VALUES (%s, %s, %s) ON CONFLICT (event_id) DO UPDATE 
-            SET error_msg = EXCLUDED.error_msg, retry_count = failed_webhooks.retry_count + 1
-        """, (event_id, json.dumps(payload), error_msg))
+            UPDATE failed_webhooks SET retry_count = retry_count + 1
+            WHERE event_id IN (
+                SELECT event_id FROM failed_webhooks WHERE retry_count < 5
+                ORDER BY created_at ASC LIMIT %s FOR UPDATE SKIP LOCKED
+            ) RETURNING *
+        """, (limit,))
+        return cur.fetchall()
 
 def get_failed_webhooks(limit=10):
     with get_db() as cur:
@@ -129,14 +127,9 @@ def delete_failed_webhook(event_id: str):
     with get_db() as cur:
         cur.execute("DELETE FROM failed_webhooks WHERE event_id = %s", (event_id,))
 
-# ✅ NEW: Infinite Memory (Summarization) Functions
 def save_conversation_summary(user_id: str, summary: str):
     with get_db() as cur:
-        cur.execute("""
-            INSERT INTO conversation_summaries (user_id, summary) 
-            VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE 
-            SET summary = EXCLUDED.summary, updated_at = NOW()
-        """, (user_id, summary))
+        cur.execute("""INSERT INTO conversation_summaries (user_id, summary) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET summary = EXCLUDED.summary, updated_at = NOW()""", (user_id, summary))
 
 def get_conversation_summary(user_id: str) -> str:
     with get_db() as cur:
@@ -146,30 +139,21 @@ def get_conversation_summary(user_id: str) -> str:
 
 def trim_old_memories(user_id: str, keep_last: int = 3):
     with get_db() as cur:
-        cur.execute("""
-            DELETE FROM conversation_memory 
-            WHERE user_id = %s AND id NOT IN (
-                SELECT id FROM conversation_memory WHERE user_id = %s ORDER BY created_at DESC LIMIT %s
-            )
-        """, (user_id, user_id, keep_last))
+        cur.execute("""DELETE FROM conversation_memory WHERE user_id = %s AND id NOT IN (SELECT id FROM conversation_memory WHERE user_id = %s ORDER BY created_at DESC LIMIT %s)""", (user_id, user_id, keep_last))
 
-# ✅ NEW: DB Keep-Alive Ping (Prevents Render Free Tier Disconnects)
 def start_db_keepalive():
     def ping():
         while True:
-            time.sleep(60) # Reduced to 1 minute for better stability
+            time.sleep(60)
             try:
-                # Direct pool access to avoid recursive get_db() calls
                 global _pool
                 if _pool:
                     conn = _pool.getconn()
                     try:
                         with conn.cursor() as cur: cur.execute("SELECT 1")
                         conn.commit()
-                    finally:
-                        _pool.putconn(conn)
-            except Exception as e:
-                logger.debug(f"DB keepalive ping skipped or failed: {e}")
+                    finally: _pool.putconn(conn)
+            except Exception: pass
     threading.Thread(target=ping, daemon=True).start()
 
 def get_config(key: str) -> str:
@@ -185,6 +169,7 @@ def set_config(key: str, value: str):
 def is_bot_paused() -> bool: return get_config("bot_paused") == "true"
 def is_gemini_enabled() -> bool: return get_config("gemini_enabled") == "true"
 def is_safe_mode() -> bool: return get_config("safe_mode") == "true"
+
 def is_circuit_breaker_active() -> bool:
     cb_until = get_config("circuit_breaker_until")
     if cb_until and cb_until != "0":
@@ -207,6 +192,33 @@ def get_recent_replies(limit: int = 5) -> list[str]:
         cur.execute("SELECT reply_text FROM reply_logs ORDER BY created_at DESC LIMIT %s", (limit,))
         return [row["reply_text"] for row in cur.fetchall()]
 
+# ✅ NEW: Per-Post Analytics
+def get_top_posts(limit: int = 5) -> list:
+    with get_db() as cur:
+        cur.execute("""
+            SELECT media_id, COUNT(*) as reply_count 
+            FROM reply_logs 
+            WHERE media_id IS NOT NULL AND media_id != '' AND source = 'comment'
+            GROUP BY media_id ORDER BY reply_count DESC LIMIT %s
+        """, (limit,))
+        return cur.fetchall()
+
+# ✅ NEW: AI Review Fetcher
+def get_recent_ai_replies(limit: int = 5) -> list:
+    with get_db() as cur:
+        cur.execute("""
+            SELECT id, event_id, reply_text, created_at 
+            FROM reply_logs 
+            WHERE source = 'comment' AND reply_text NOT LIKE 'Thank you%%' AND reply_text NOT LIKE 'Radhe Radhe%%'
+            ORDER BY created_at DESC LIMIT %s
+        """, (limit,))
+        return cur.fetchall()
+
+# ✅ NEW: Save Feedback
+def save_reply_feedback(reply_log_id: int, feedback: str):
+    with get_db() as cur:
+        cur.execute("""INSERT INTO reply_feedback (reply_log_id, feedback) VALUES (%s, %s) ON CONFLICT (reply_log_id) DO UPDATE SET feedback = EXCLUDED.feedback""", (reply_log_id, feedback))
+
 def save_dm_memory(user_id: str, role: str, text: str):
     with get_db() as cur:
         cur.execute("INSERT INTO conversation_memory (user_id, role, message_text) VALUES (%s, %s, %s)", (user_id, role, text))
@@ -219,6 +231,11 @@ def get_dm_memory(user_id: str, limit: int = 5) -> list[dict]:
 def claim_welcome_dm(user_id: str) -> bool:
     with get_db() as cur:
         cur.execute("INSERT INTO dm_cooldowns (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
+        return cur.rowcount == 1
+
+def claim_c2dm_dm(user_id: str, keyword: str) -> bool:
+    with get_db() as cur:
+        cur.execute("INSERT INTO c2dm_cooldowns (user_id, keyword) VALUES (%s, %s) ON CONFLICT DO NOTHING", (user_id, keyword))
         return cur.rowcount == 1
 
 def set_human_handoff(user_id: str, hours: int = 24):
@@ -268,7 +285,12 @@ def get_stats() -> dict:
 
 def get_recent_activity(limit: int = 10) -> list:
     with get_db() as cur:
-        cur.execute("""SELECT action, created_at FROM (SELECT source AS action, created_at FROM reply_logs ORDER BY created_at DESC LIMIT 50) r UNION ALL SELECT 'Welcome DM' AS action, sent_at AS created_at FROM dm_cooldowns ORDER BY sent_at DESC LIMIT 10 ORDER BY created_at DESC LIMIT %s""", (limit,))
+        cur.execute("""
+            (SELECT source AS action, created_at FROM reply_logs ORDER BY created_at DESC LIMIT 50) 
+            UNION ALL 
+            (SELECT 'Welcome DM' AS action, sent_at AS created_at FROM dm_cooldowns ORDER BY sent_at DESC LIMIT 10) 
+            ORDER BY created_at DESC LIMIT %s
+        """, (limit,))
         return cur.fetchall()
 
 def cleanup_old_data():
@@ -278,9 +300,10 @@ def cleanup_old_data():
         cur.execute("DELETE FROM conversation_memory WHERE created_at < NOW() - INTERVAL '14 days'")
         cur.execute("DELETE FROM human_handoff_cooldowns WHERE expires_at < NOW()")
         cur.execute("DELETE FROM gemini_quotas WHERE usage_date < NOW() - INTERVAL '30 days'")
-        # ✅ NEW: Cleanup DLQ and Summaries
         cur.execute("DELETE FROM failed_webhooks WHERE created_at < NOW() - INTERVAL '30 days'")
         cur.execute("DELETE FROM conversation_summaries WHERE updated_at < NOW() - INTERVAL '90 days'")
+        cur.execute("DELETE FROM c2dm_cooldowns WHERE sent_at < NOW() - INTERVAL '30 days'")
+        cur.execute("DELETE FROM reply_feedback WHERE created_at < NOW() - INTERVAL '90 days'")
 
 def is_active_hours() -> bool:
     ist_hour = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).hour
