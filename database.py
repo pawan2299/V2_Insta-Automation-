@@ -103,8 +103,10 @@ def claim_event(event_id: str) -> bool:
     if not event_id: return False
     lock_id = int(hashlib.md5(event_id.encode()).hexdigest(), 16) % (2**31 - 1)
     with get_db() as cur:
-        cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (lock_id,))
-        if not cur.fetchone()[0]:
+        # ✅ FIX: RealDictCursor returns a dict, so we use an alias 'locked' and access it by key name
+        cur.execute("SELECT pg_try_advisory_xact_lock(%s) as locked", (lock_id,))
+        row = cur.fetchone()
+        if not row or not row['locked']:
             return False # Another worker is already processing this
         cur.execute("INSERT INTO processed_events (event_id) VALUES (%s) ON CONFLICT DO NOTHING", (event_id,))
         return cur.rowcount == 1
