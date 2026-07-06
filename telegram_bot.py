@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 import requests
+import time
 import traceback
 from datetime import datetime, timezone, timedelta
 from config import SETTINGS
@@ -17,12 +18,23 @@ def _make_progress_bar(used: int, limit: int, length: int = 10) -> str:
     filled = int(length * pct / 100)
     return "█" * filled + "░" * (length - filled)
 
-def _send(chat_id: str, text: str, reply_markup: dict = None):
+# [R&D FIX]: Added retry logic for Telegram 429 (Too Many Requests) Flood Control
+def _send(chat_id: str, text: str, reply_markup: dict = None, retries=3):
     try:
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
         if reply_markup: payload["reply_markup"] = reply_markup
-        requests.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10)
-    except Exception as e: logger.error(f"Telegram request failed: {e}")
+        
+        resp = requests.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10)
+        
+        if resp.status_code == 429 and retries > 0:
+            retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+            logger.warning(f"Telegram Rate Limit. Waiting {retry_after}s...")
+            time.sleep(retry_after)
+            _send(chat_id, text, reply_markup, retries-1)
+            return
+            
+    except Exception as e: 
+        logger.error(f"Telegram request failed: {e}")
 
 def _edit_message(chat_id: str, message_id: int, text: str, reply_markup: dict = None):
     try:
@@ -66,14 +78,14 @@ def handle_update(update: dict):
             else:
                 db.clear_telegram_state(chat_id)
                 _send(chat_id, "⚠️ <i>Setup cancelled due to new command.</i>")
-
+                
         if not text.startswith("/"): return
         cmd_parts = text.split()
         cmd = cmd_parts[0].lower().split("@")[0]
         args = cmd_parts[1:]
-
+        
         if cmd == "/start" or cmd == "/menu":
-            _send(chat_id, " <b>Krishna Verse AI Control Center</b>\nSelect a category:", reply_markup=MAIN_MENU_BUTTONS)
+            _send(chat_id, "🦚 <b>Krishna Verse AI Control Center</b>\nSelect a category:", reply_markup=MAIN_MENU_BUTTONS)
         elif cmd == "/status": send_status_update(chat_id)
         elif cmd == "/festivals": send_festivals_update(chat_id)
         elif cmd == "/pause":
@@ -104,44 +116,47 @@ def handle_update(update: dict):
             _send(chat_id, f"✅ Sleep hours set: {s}:00 to {e}:00 IST")
         elif cmd == "/logs":
             logs = db.get_recent_activity()
-            _send(chat_id, " <b>Recent Activity:</b>\n" + "\n".join([f"• {l['action']} at {l['created_at'].strftime('%H:%M:%S')}" for l in logs]) if logs else "No activity.")
+            _send(chat_id, "⚡ <b>Recent Activity:</b>\n" + "\n".join([f"• {l['action']} at {l['created_at'].strftime('%H:%M:%S')}" for l in logs]) if logs else "No activity.")
         elif cmd == "/ping": _send(chat_id, "🏓 <b>Pong</b>\nBot: Running\nDatabase: Connected\nTelegram: OK")
         elif cmd == "/help":
-            _send(chat_id, "🦚 <b>Krishna Verse AI Help</b>\n\nUse /menu for the interactive dashboard.\n\n<b>Quick Commands:</b>\n/status — Live stats & Quotas\n/pause — Stop bot\n/resume — Start bot\n/panic — Emergency stop\n/caption topic — Generate caption\n/festivals — Upcoming festivals\n/c2dm — Comment-to-DM setup\n/logs — Recent activity")
+            _send(chat_id, "🦚 <b>Krishna Verse AI Help</b>\nUse /menu for the interactive dashboard.\n<b>Quick Commands:</b>\n/status — Live stats & Quotas\n/pause — Stop bot\n/resume — Start bot\n/panic — Emergency stop\n/caption topic — Generate caption\n/festivals — Upcoming festivals\n/c2dm — Comment-to-DM setup\n/logs — Recent activity")
         elif cmd == "/c2dm": show_c2dm_main_menu(chat_id)
-            
     except Exception: logger.error(f"Telegram command failed:\n{traceback.format_exc()}")
 
 def send_status_update(chat_id: str, msg_id: int = None):
     from gemini_client import MODEL_CONFIGS, _clients
     stats = db.get_stats()
     gemini_count = db.get_total_gemini_today()
+    
     state_str = "🟢 RUNNING"
     if stats['bot_paused']: state_str = "⏸ PAUSED"
     elif stats['safe_mode']: state_str = "🛡️ SAFE MODE"
-
+    
     text = f"📊 <b>Bot Status:</b> {state_str}\n🤖 <b>Gemini:</b> {'🟢 ON' if stats['gemini_enabled'] else '⚪ OFF'}\n"
-    text += f"🚨 <b>Circuit Breaker:</b> {'ACTIVE' if stats['circuit_breaker_active'] else '🟢 OK'}\n📈 <b>Total Calls Today:</b> {gemini_count}\n\n"
-    text += "<b> Gemini Quotas (Today)</b>\n"
+    text += f"🚨 <b>Circuit Breaker:</b> {'ACTIVE' if stats['circuit_breaker_active'] else '🟢 OK'}\n📈 <b>Total Calls Today:</b> {gemini_count}\n"
+    text += "<b>✨ Gemini Quotas (Today)</b>\n"
+    
     total_pool = len(_clients) if _clients else 1
     for m in MODEL_CONFIGS:
         used = db.get_model_rpd(m["id"])
         limit = m["rpd"] * total_pool
         bar = _make_progress_bar(used, limit)
-        text += f"<code>{bar}</code> {m['label']}\n     {used} / {limit} requests\n\n"
-    text += f"💌 <b>Replies (24h):</b> {stats['last_24h_replies']}"
+        text += f"<code>{bar}</code> {m['label']}\n{used} / {limit} requests\n"
+        
+    text += f"\n💌 <b>Replies (24h):</b> {stats['last_24h_replies']}"
+    back_btn = {"inline_keyboard": [[{"text": "🔙 Back to Menu", "callback_data": "menu_main"}]]}
     
-    back_btn = {"inline_keyboard": [[{"text": " Back to Menu", "callback_data": "menu_main"}]]}
     if msg_id: _edit_message(chat_id, msg_id, text, reply_markup=back_btn)
     else: _send(chat_id, text, reply_markup=back_btn)
 
 def send_festivals_update(chat_id: str, msg_id: int = None):
     upcoming = get_upcoming_festivals(days_ahead=30)
-    text = " <b>Upcoming Festivals (Next 30 Days)</b>\n"
+    text = "🎉 <b>Upcoming Festivals (Next 30 Days)</b>\n"
     if not upcoming: text += "<i>No major festivals.</i>\n"
     else:
         for fest in upcoming:
-            text += f"🌸 <b>{fest['name']}</b>\n   📅 {fest['date_obj'].strftime('%d %b')} (<i>In {fest['days_until']} days</i>)\n   💡 <i>Ideas: {', '.join(fest['ideas'][:2])}</i>\n\n"
+            text += f"🌸 <b>{fest['name']}</b>\n📅 {fest['date_obj'].strftime('%d %b')} (<i>In {fest['days_until']} days</i>)\n💡 <i>Ideas: {', '.join(fest['ideas'][:2])}</i>\n\n"
+            
     back_btn = {"inline_keyboard": [[{"text": "🔙 Back to Menu", "callback_data": "menu_main"}]]}
     if msg_id: _edit_message(chat_id, msg_id, text, reply_markup=back_btn)
     else: _send(chat_id, text, reply_markup=back_btn)
@@ -151,11 +166,12 @@ def handle_callback_query(query: dict):
     data = query["data"]; query_id = query["id"]
     if chat_id != SETTINGS.telegram_chat_id: _answer_callback(query_id, "Unauthorized"); return
     _answer_callback(query_id, "Loading...")
+    
     if data == "menu_main": _edit_message(chat_id, msg_id, "🦚 <b>Krishna Verse AI</b>", reply_markup=MAIN_MENU_BUTTONS)
     elif data == "menu_status": send_status_update(chat_id, msg_id)
     elif data == "menu_festivals": send_festivals_update(chat_id, msg_id)
     elif data == "menu_controls":
-        controls = {"inline_keyboard": [[{"text": "⏸ Pause", "callback_data": "ctrl_pause"}, {"text": "▶️ Resume", "callback_data": "ctrl_resume"}], [{"text": "🚨 Panic", "callback_data": "ctrl_panic"}], [{"text": " Back", "callback_data": "menu_main"}]]}
+        controls = {"inline_keyboard": [[{"text": "⏸ Pause", "callback_data": "ctrl_pause"}, {"text": "▶️ Resume", "callback_data": "ctrl_resume"}], [{"text": "🚨 Panic", "callback_data": "ctrl_panic"}], [{"text": "🔙 Back", "callback_data": "menu_main"}]]}
         _edit_message(chat_id, msg_id, "⚙️ <b>System Controls</b>", reply_markup=controls)
     elif data == "menu_ai":
         ai_btns = {"inline_keyboard": [[{"text": "✨ AI On", "callback_data": "ctrl_ai_on"}, {"text": "⚪ AI Off", "callback_data": "ctrl_ai_off"}], [{"text": "🔙 Back", "callback_data": "menu_main"}]]}
@@ -168,7 +184,7 @@ def handle_callback_query(query: dict):
     elif data == "c2dm_menu": show_c2dm_main_menu(chat_id, msg_id)
     elif data == "c2dm_add":
         db.set_telegram_state(chat_id, {"action": "c2dm_setup", "step": 1})
-        _send(chat_id, "➕ <b>Step 1/3:</b>\nSend the <b>Trigger Keyword</b>.\n\n<i>Type /cancel to abort.</i>")
+        _send(chat_id, "➕ <b>Step 1/3:</b>\nSend the <b>Trigger Keyword</b>.\n<i>Type /cancel to abort.</i>")
     elif data == "c2dm_list": show_c2dm_list(chat_id, msg_id)
     elif data == "c2dm_toggle": db.toggle_c2dm(); show_c2dm_main_menu(chat_id, msg_id)
     elif data.startswith("c2dm_del_"): db.delete_c2dm_trigger(int(data.split("_")[2])); show_c2dm_list(chat_id, msg_id)
@@ -232,7 +248,7 @@ def show_c2dm_main_menu(chat_id: str, msg_id: int = None):
 def show_c2dm_list(chat_id: str, msg_id: int = None):
     triggers = db.get_c2dm_triggers()
     btns = [[{"text": f"🗑 {t['keyword']}", "callback_data": f"c2dm_del_{t['id']}"}] for t in triggers]
-    btns.append([{"text": " Back", "callback_data": "c2dm_menu"}])
+    btns.append([{"text": "🔙 Back", "callback_data": "c2dm_menu"}])
     text = "📋 <b>Triggers:</b>\n" + "\n".join([f"• {t['keyword']}" for t in triggers]) if triggers else "No triggers."
     if msg_id: _edit_message(chat_id, msg_id, text, reply_markup={"inline_keyboard": btns})
     else: _send(chat_id, text, reply_markup={"inline_keyboard": btns})
