@@ -3,7 +3,6 @@ import logging
 import time
 import json
 import re
-import gc
 import requests
 from collections import deque
 from google import genai
@@ -11,8 +10,7 @@ from google.genai import types
 from config import SETTINGS
 from database import (
     get_config, set_config, get_model_rpd, increment_gemini_count,
-    get_recent_replies, save_dm_memory, get_dm_memory,
-    get_conversation_summary, save_conversation_summary, trim_old_memories
+    get_recent_replies, get_dm_memory, get_conversation_summary
 )
 
 logger = logging.getLogger(__name__)
@@ -23,7 +21,6 @@ def _init_clients():
     _clients = [genai.Client(api_key=k) for k in SETTINGS.gemini_api_keys if k]
 _init_clients()
 
-# ✅ MODEL_CONFIGS को सबसे पहले define किया (इसके बाद ही model_usage_counter use होगा)
 MODEL_CONFIGS = [
     {"id": "gemini-3.5-flash", "rpm": 10, "rpd": 1500, "label": "3.5 Flash (Core)"},
     {"id": "gemini-3.1-flash-lite", "rpm": 15, "rpd": 1500, "label": "3.1 Lite (Filters)"},
@@ -31,7 +28,6 @@ MODEL_CONFIGS = [
     {"id": "gemini-2.5-flash", "rpm": 10, "rpd": 1500, "label": "2.5 Flash (Fallback)"},
 ]
 
-# ✅ अब यह MODEL_CONFIGS के बाद है - Error fix हो गया!
 model_usage_counter = {m["id"]: 0 for m in MODEL_CONFIGS}
 _model_rpm_calls: dict[str, deque] = {m["id"]: deque() for m in MODEL_CONFIGS}
 
@@ -54,15 +50,16 @@ def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", im
 
     contents = [prompt]
     
-    # ✅ Safe Image Download with strict 2MB limit
+    # Safe Image Download with strict size limits to prevent OOM on 512MB RAM
     if image_url:
         try:
             head_resp = requests.head(image_url, timeout=3, allow_redirects=True)
             content_length = int(head_resp.headers.get('Content-Length', 0))
+            # Strict limit: 2MB max to protect Render Free Tier RAM
             if 0 < content_length < 2 * 1024 * 1024:
                 img_data = requests.get(image_url, timeout=5).content
                 contents.append(types.Part.from_bytes(data=img_data, mime_type="image/jpeg"))
-                del img_data
+                del img_data # Free memory immediately
         except Exception as e:
             logger.warning(f"⚠️ Image download skipped for {image_url}: {e}")
 
@@ -76,7 +73,7 @@ def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", im
 
     for client_idx, client in enumerate(_clients):
         for model_id in models_to_try:
-            # ✅ Per-Key Cooldown Check
+            # Per-Key Cooldown Check
             until = get_config(f"cooldown_{model_id}_{client_idx}")
             if until and until != "0" and time.time() < float(until):
                 continue
@@ -96,24 +93,15 @@ def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", im
                 start_time = time.time()
                 resp = client.models.generate_content(model=model_id, contents=contents, config=config)
                 latency_ms = (time.time() - start_time) * 1000
+                
                 _record_call(model_id)
                 set_config("consecutive_429s", "0")
+                logger.info(f"✅ Gemini API Success: {model_id} (Key {client_idx}) | Latency: {latency_ms:.0f}ms | Task: {task_type}")
                 
-                logger.info(f"✅ Gemini API Success: {model_id} | Latency: {latency_ms:.0f}ms | Task: {task_type}")
-                
-                global model_usage_counter
-                model_usage_counter[model_id] += 1
-                if model_usage_counter[model_id] % 50 == 0:
-                    logger.info(f"📊 Model {model_id} usage: {model_usage_counter[model_id]} calls")
-                
-                gc.collect()
                 return (resp.text or "").strip()
-                
             except Exception as e:
-                latency_ms = (time.time() - start_time) * 1000 if 'start_time' in locals() else 0
                 error_msg = str(e)
-                logger.error(f"❌ Gemini API Failed: {model_id} | Latency: {latency_ms:.0f}ms | Error: {error_msg}")
-                
+                logger.error(f"❌ Gemini API Failed: {model_id} (Key {client_idx}) | Error: {error_msg}")
                 if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
                     set_config(f"cooldown_{model_id}_{client_idx}", str(time.time() + 300))
                     continue
@@ -121,8 +109,6 @@ def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", im
                     return None
                 else:
                     break
-    
-    gc.collect()
     return None
 
 def generate_reply(comment_text: str, post_caption: str = "", image_url: str | None = None) -> str | None:
@@ -138,7 +124,7 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
         "RULES:\n"
         "- Keep replies VERY short (under 15 words).\n"
         "- Be cute, warm, and conversational.\n"
-        "- NEVER use heavy devotional blessings.\n"
+        "- NEVER use heavy devotional blessings. They feel awkward and robotic.\n"
         "- NEVER ask people to follow in every reply.\n"
         "- Match the user's language (Hindi/English/Hinglish).\n"
         "- Do NOT use markdown formatting like **bold**.\n"
@@ -161,6 +147,7 @@ def generate_dm_reply(message_text: str, user_id: str) -> str | None:
     summary = get_conversation_summary(user_id)
     history = get_dm_memory(user_id, 3)
     history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in history]) if history else ""
+    
     summary_context = f"\n[Long-term Context Summary]: {summary}\n" if summary else ""
     
     prompt = (
@@ -247,7 +234,6 @@ def generate_weekly_insight(stats: dict) -> str | None:
     prompt = f"Social media analyst for @krishna.verse.ai.\nThis week: {stats.get('total_comments_replied', 0)} replies, {stats.get('welcome_dms_sent', 0)} DMs.\nGive 3 practical growth suggestions. Under 100 words."
     return _generate(prompt, max_length=500, task_type="dm")
 
-# ✅ NEW: Semantic Summarization Function (Infinite Memory)
 def summarize_conversation(user_id: str, messages: list[dict]) -> str | None:
     if not can_use_gemini(): return None
     history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in messages])
@@ -270,12 +256,17 @@ def generate_festival_list(years: list[int]) -> list[dict] | None:
     )
     result = _generate(prompt, max_length=4000, task_type="dm")
     if not result: return None
-    result = re.sub(r'^```(?:json)?\s*', '', result.strip(), flags=re.IGNORECASE)
-    result = re.sub(r'\s*```$', '', result.strip())
-    try:
-        parsed = json.loads(result)
-        if isinstance(parsed, list) and len(parsed) > 0: return parsed
-        return None
-    except json.JSONDecodeError:
-        logger.error(f"Failed to parse festival JSON from Gemini: {result[:200]}")
-        return None
+    
+    # Robust JSON extraction (Handles AI adding extra text before/after JSON)
+    start_idx = result.find('[')
+    end_idx = result.rfind(']')
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        json_str = result[start_idx:end_idx+1]
+        try:
+            parsed = json.loads(json_str)
+            if isinstance(parsed, list) and len(parsed) > 0: return parsed
+        except json.JSONDecodeError:
+            pass
+            
+    logger.error(f"Failed to parse festival JSON from Gemini: {result[:200]}")
+    return None
