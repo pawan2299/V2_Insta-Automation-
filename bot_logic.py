@@ -1,13 +1,8 @@
 from __future__ import annotations
 import logging
-import time
-
-comment_counter = 0
-comment_success_counter = 0
-comment_fail_counter = 0
-spam_blocked_counter = 0
 import random
 import re
+import time
 from database import (
     is_already_replied, log_reply, claim_event, claim_welcome_dm,
     is_bot_paused, is_gemini_enabled, is_safe_mode, get_config, set_config,
@@ -20,7 +15,7 @@ from gemini_client import (
     is_spam_or_negative, _gemini_should_reply_dm, classify_comment_intent, 
     generate_story_thank_you, summarize_conversation
 )
-from instagram_api import reply_to_comment, send_dm, get_media_details, download_and_compress_image
+from instagram_api import reply_to_comment, send_dm, get_media_details
 
 logger = logging.getLogger(__name__)
 
@@ -46,42 +41,56 @@ def _looks_suspicious(text: str) -> bool:
     return False
 
 def handle_comment(comment_data: dict):
+    start_time = time.time()
     try:
-        if is_bot_paused() or not is_active_hours(): return
+        if is_bot_paused() or not is_active_hours(): 
+            logger.debug("⏸️ Comment ignored: Bot paused or sleep hours.")
+            return
+            
         comment_id = comment_data.get("id", "")
         text = comment_data.get("text", "").strip()
         from_id = str(comment_data.get("from", {}).get("id", ""))
         media_id = comment_data.get("media_id", "")
         
-        if not comment_id or not text or not from_id: return
+        if not comment_id or not text or not from_id: 
+            logger.warning("❌ Comment ignored: Missing ID, text, or from_id.")
+            return
+            
         from config import SETTINGS
-        if from_id == SETTINGS.own_account_id: return
-                if not claim_event(comment_id): 
-            logger.warning(f"Comment {comment_id} already claimed or invalid event.")
+        if from_id == SETTINGS.own_account_id: 
+            logger.debug("⏸️ Comment ignored: Own account comment.")
             return
-                if is_already_replied(comment_id): 
-            logger.info(f"Comment {comment_id} already replied to. Skipping.")
+            
+        if not claim_event(comment_id): 
+            logger.info(f"⏸️ Comment {comment_id[:15]}... ignored: Already processing (Advisory Lock).")
             return
-        
+            
+        if is_already_replied(comment_id): 
+            logger.info(f"⏸️ Comment {comment_id[:15]}... ignored: Already replied.")
+            return
+
+        # C2DM Check
         if is_c2dm_enabled():
             trigger = find_c2dm_trigger(text)
             if trigger:
+                logger.info(f"✅ C2DM Triggered for keyword: '{trigger['keyword']}'")
                 reply_to_comment(comment_id, trigger['public_reply'])
                 send_dm(from_id, trigger['dm_message'])
                 log_reply(comment_id, from_id, trigger['public_reply'], media_id, "c2dm")
                 return
 
         use_ai = is_gemini_enabled() and not is_safe_mode()
+        reply = None
+        reply_type = "unknown"
+
         if _is_emoji_only(text):
             reply = random.choice(EMOJI_REPLIES)
             reply_type = "emoji"
         else:
             if len(text) > 15 and _looks_suspicious(text) and use_ai:
                 if is_spam_or_negative(text):
+                    logger.info(f"🛡️ [SPAM FILTERED] Comment: {text[:50]}...")
                     log_reply(comment_id, from_id, "[Filtered Spam]", media_id)
-                    global spam_blocked_counter
-                    spam_blocked_counter += 1
-                    logger.info(f"📊 Spam Filtered: {comment_id[:20]}...")
                     return
             
             reply = get_keyword_reply(text)
@@ -91,75 +100,63 @@ def handle_comment(comment_data: dict):
                 intent = classify_comment_intent(text)
                 reply_type = intent
                 if intent == "spam":
+                    logger.info(f"🛡️ [AI FILTERED] Comment: {text[:50]}...")
                     log_reply(comment_id, from_id, "[AI Filtered Spam]", media_id)
-                    global spam_blocked_counter
-                    spam_blocked_counter += 1
-                    logger.info(f"📊 AI Spam Filtered: {comment_id[:20]}...")
                     return
                 elif intent in ("greeting", "praise"):
                     reply = random.choice(AESTHETIC_REPLIES)
                 else:
                     details = get_media_details(media_id) if media_id else {}
-                    image_bytes = None
-                    if details.get("type") == "IMAGE" and details.get("url"):
-                        image_bytes = download_and_compress_image(details["url"])
+                    # ✅ OPTIMIZATION: Pass URL directly. gemini_client.py handles safe 2MB download!
+                    image_url = details.get("url") if details.get("type") == "IMAGE" else None
                     post_caption = details.get("caption", "")
                     
-                    reply = generate_reply(text, post_caption=post_caption, image_bytes=image_bytes)
+                    reply = generate_reply(text, post_caption=post_caption, image_url=image_url)
             elif reply is None:
                 reply = random.choice(AESTHETIC_REPLIES)
                 reply_type = "fallback"
 
-        reply_successful = reply_to_comment(comment_id, reply)
-        if reply_successful:
+        if reply and reply_to_comment(comment_id, reply):
             log_reply(comment_id, from_id, reply, media_id, "comment")
-            global comment_success_counter
-            comment_success_counter += 1
-            logger.info(f"✅ Comment replied: {comment_id[:20]}... | Type: {reply_type}")
+            latency = (time.time() - start_time) * 1000
+            logger.info(f"✅ Comment Replied [{reply_type}] | ID: {comment_id[:15]}... | Latency: {latency:.0f}ms")
         else:
-            global comment_fail_counter
-            comment_fail_counter += 1
-            logger.error(f"❌ Comment reply FAILED: {comment_id[:20]}... | Reply: {reply[:50]}...")
-
-        global comment_counter
-        comment_counter += 1
-        if comment_counter % 10 == 0:
-            logger.info(f"📊 Last 10 comments: {comment_success_counter} replied, {comment_fail_counter} failed, {spam_blocked_counter} spam blocked")
-            comment_success_counter = 0
-            comment_fail_counter = 0
-            spam_blocked_counter = 0
+            logger.error(f"❌ Comment Reply Failed | ID: {comment_id[:15]}...")
+            
     except Exception as e:
-        logger.error(f"❌ Error handling comment {comment_data.get("id", "unknown")}: {e}")
-        # ✅ NEW: Save to Dead Letter Queue
+        logger.error(f"❌ CRITICAL ERROR in handle_comment: {e}")
         save_failed_webhook(comment_data.get("id", "unknown"), comment_data, str(e))
 
 def handle_new_follower(user_id: str, username: str = ""):
-    if is_bot_paused() or not user_id: return
-    from config import SETTINGS
-    if user_id == SETTINGS.own_account_id: return
-    if not claim_welcome_dm(user_id): 
-        logger.info(f"Welcome DM already claimed or invalid event for user {user_id}. Skipping.")
-        return
-    
-    use_ai = is_gemini_enabled() and not is_safe_mode()
-    dm_text = (generate_welcome_dm(username) if username and use_ai else None) or WELCOME_DM
-    
-    dm_sent_successful = send_dm(user_id, dm_text)
-    if dm_sent_successful:
-        log_reply(f"welcome_{user_id}", user_id, dm_text, source="dm")
-        save_dm_memory(user_id, "bot", dm_text)
-        logger.info(f"✅ Welcome DM sent to {user_id}")
-    else:
-        logger.error(f"❌ Welcome DM FAILED to send to {user_id}")
+    try:
+        if is_bot_paused() or not user_id: return
+        from config import SETTINGS
+        if user_id == SETTINGS.own_account_id: return
+        if not claim_welcome_dm(user_id): 
+            logger.info(f"⏸️ Welcome DM skipped: Already sent to {user_id}")
+            return
+        
+        use_ai = is_gemini_enabled() and not is_safe_mode()
+        dm_text = (generate_welcome_dm(username) if username and use_ai else None) or WELCOME_DM
+        
+        if send_dm(user_id, dm_text):
+            log_reply(f"welcome_{user_id}", user_id, dm_text, source="dm")
+            save_dm_memory(user_id, "bot", dm_text)
+            logger.info(f"✅ Welcome DM sent to {user_id} (@{username})")
+        else:
+            logger.error(f"❌ Welcome DM Failed for {user_id}")
+    except Exception as e:
+        logger.error(f"❌ CRITICAL ERROR in handle_new_follower: {e}")
 
 def _notify_human_dm(sender_id: str, message_text: str):
     try:
         from telegram_bot import _send
         from config import SETTINGS
         _send(SETTINGS.telegram_chat_id, f"🚨 <b>DM Escalated to Admin!</b>\nFrom: <code>{sender_id}</code>\nMessage: {message_text[:200]}\n<i>(Bot locked for this user for 24h)</i>")
-    except Exception as e: logger.error(f"Notify human DM failed: {e}")
+    except Exception as e: logger.error(f"❌ Notify human DM failed: {e}")
 
 def handle_dm(dm_data: dict):
+    start_time = time.time()
     try:
         if is_bot_paused(): return
         if dm_data.get("message", {}).get("is_echo", False): return
@@ -172,72 +169,74 @@ def handle_dm(dm_data: dict):
         from config import SETTINGS
         if sender_id in (SETTINGS.own_account_id, SETTINGS.page_id): return
         if not claim_event(message_id): 
-        logger.warning(f"DM {message_id} already claimed or invalid event. Skipping.")
-        return
+            logger.info(f"⏸️ DM {message_id[:15]}... ignored: Already processing.")
+            return
         
+        # Story Mention Check
         attachments = dm_data.get("message", {}).get("attachments", [])
         for att in attachments:
             if att.get("type") == "story_mention":
                 logger.info(f"✅ Story Mention detected from {sender_id}")
-                story_reply = generate_story_thank_you() or "🌸 Radhe Radhe! Thanks for sharing our content on your story! We truly appreciate it. ✨"
-                story_reply_successful = send_dm(sender_id, story_reply)
-                if story_reply_successful:
+                story_reply = generate_story_thank_you() or "🌸 Radhe Radhe! Thanks for sharing our content on your story! ✨"
+                if send_dm(sender_id, story_reply):
                     log_reply(message_id, sender_id, story_reply, source="story_mention")
                     save_dm_memory(sender_id, "bot", story_reply)
-                    logger.info(f"✅ Story mention reply sent to {sender_id}")
-                else:
-                    logger.error(f"❌ Story mention reply FAILED to send to {sender_id}")
                 return
 
         if not message_text: return
         if is_in_human_handoff(sender_id):
-            logger.info(f"ℹ️ DM ignored (Human Handoff active) for {sender_id}")
+            logger.info(f"⏸️ DM ignored (Human Handoff active) for {sender_id}")
             return
 
         save_dm_memory(sender_id, "user", message_text)
         use_ai = is_gemini_enabled() and not is_safe_mode()
         
         reply = get_keyword_reply(message_text)
+        reply_type = "keyword"
+        
         if reply is None and use_ai:
             should_reply = _gemini_should_reply_dm(message_text, sender_id)
             if not should_reply:
-                logger.warning(f"⚠️ DM Escalated (needs human): {message_text[:50]}")
+                logger.info(f"🚨 DM Escalated (needs human): {message_text[:50]}...")
                 if send_dm(sender_id, ESCALATION_ACK_DM):
                     log_reply(f"ack_{message_id}", sender_id, ESCALATION_ACK_DM, source="dm_ack")
                     save_dm_memory(sender_id, "bot", ESCALATION_ACK_DM)
                     set_human_handoff(sender_id, 24)
                     _notify_human_dm(sender_id, message_text)
                 return
-            reply = generate_dm_reply(message_text, sender_id)
             
-        if reply is None: reply = random.choice(AESTHETIC_REPLIES)
+            reply = generate_dm_reply(message_text, sender_id)
+            reply_type = "ai"
+            
+        if reply is None: 
+            reply = random.choice(AESTHETIC_REPLIES)
+            reply_type = "fallback"
         
-        dm_reply_successful = send_dm(sender_id, reply)
-        if dm_reply_successful:
+        if send_dm(sender_id, reply):
             log_reply(message_id, sender_id, reply, source="dm")
             save_dm_memory(sender_id, "bot", reply)
-            logger.info(f"✅ DM sent to {sender_id} | Length: {len(reply)} chars")
-        else:
-            logger.error(f"❌ DM FAILED to send to {sender_id} | Reply: {reply[:50]}...")
+            latency = (time.time() - start_time) * 1000
+            logger.info(f"✅ DM Replied [{reply_type}] | User: {sender_id} | Latency: {latency:.0f}ms")
             
             # ✅ NEW: Trigger Semantic Summarization if memory > 10 messages
             check_and_summarize_memory(sender_id)
+        else:
+            logger.error(f"❌ DM Reply Failed | User: {sender_id}")
             
     except Exception as e:
-        logger.error(f"❌ Error handling DM {dm_data.get("message", {}).get("mid", "unknown")}: {e}")
+        logger.error(f"❌ CRITICAL ERROR in handle_dm: {e}")
         save_failed_webhook(dm_data.get("message", {}).get("mid", "unknown"), dm_data, str(e))
 
-# ✅ NEW: Infinite Memory Management
+# ✅ NEW: Infinite Memory Management (Semantic Summarization)
 def check_and_summarize_memory(user_id: str):
     try:
-        messages = get_dm_memory(user_id, 15) # Fetch a bit more to check count
+        messages = get_dm_memory(user_id, 15)
         if len(messages) > 10:
-            # Summarize the older ones (all except last 3)
             to_summarize = messages[:-3]
             summary = summarize_conversation(user_id, to_summarize)
             if summary:
                 save_conversation_summary(user_id, summary)
-                trim_old_memories(user_id, 3) # Keep only last 3 messages fresh
-                logger.info(f"✅ Summarized memory for {user_id}")
+                trim_old_memories(user_id, 3)
+                logger.info(f"🧠 ✅ Memory Summarized for {user_id} | Old messages archived.")
     except Exception as e:
-        logger.error(f"Summarization failed: {e}")
+        logger.error(f"❌ Summarization failed for {user_id}: {e}")
