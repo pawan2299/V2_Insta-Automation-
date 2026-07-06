@@ -32,7 +32,7 @@ class Settings:
     telegram_bot_token: str
     telegram_chat_id: str
     dm_access_token: str
-    public_base_url: str = "production"
+    public_base_url: str = "" # ✅ FIX: Removed "production" default
     environment: str = "production"
     log_level: str = "INFO"
     port: int = 5000
@@ -53,7 +53,6 @@ def _load() -> Settings:
         key_env = "GEMINI_API_KEY" if i == 1 else f"GEMINI_API_KEY_{i}"
         key = _get(key_env)
         if key: gemini_keys.append(key)
-
     if not gemini_keys:
         logger.critical("Missing at least one GEMINI_API_KEY")
         sys.exit(1)
