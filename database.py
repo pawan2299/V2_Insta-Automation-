@@ -23,12 +23,11 @@ def init_pool(force: bool = False):
             except Exception: pass
             _pool = None
         try:
-            # [R&D FIX]: Reduced maxconn to 3 to prevent "Too many clients" error on Neon Free Tier
             _pool = pool.ThreadedConnectionPool(
-                minconn=1, maxconn=3, dsn=SETTINGS.database_url,
+                minconn=1, maxconn=8, dsn=SETTINGS.database_url,
                 cursor_factory=RealDictCursor, connect_timeout=5,
             )
-            logger.info("DB pool initialized (maxconn=3).")
+            logger.info("DB pool initialized.")
         except Exception as e:
             logger.error(f"Failed to initialize DB pool: {e}")
             _pool = None
@@ -42,23 +41,17 @@ def get_db():
         if _pool is None or getattr(_pool, 'closed', False):
             logger.warning("DB pool closed. Reinitializing...")
             init_pool(force=True)
-            
         conn = _pool.getconn()
-        
-        # [R&D FIX]: Micro Health Check to detect stale connections instantly
         try:
-            with conn.cursor() as test_cur: 
-                test_cur.execute("SELECT 1")
+            with conn.cursor() as test_cur: test_cur.execute("SELECT 1")
         except Exception:
-            logger.warning("Stale connection detected, dropping and recreating pool.")
+            logger.warning("Stale connection, recreating pool.")
             try: _pool.putconn(conn, close=True)
             except Exception: pass
             conn = None
             init_pool(force=True)
             conn = _pool.getconn()
-            
-        with conn.cursor() as cur: 
-            yield cur
+        with conn.cursor() as cur: yield cur
         conn.commit()
     except Exception:
         if conn:
@@ -190,76 +183,18 @@ def get_stats() -> dict:
 
 def get_recent_activity(limit: int = 10) -> list:
     with get_db() as cur:
-        cur.execute("""SELECT action, created_at FROM (SELECT source AS action, created_at FROM reply_logs ORDER BY created_at DESC LIMIT 50) r UNION ALL SELECT 'Welcome DM' AS action, sent_at AS created_at FROM dm_cooldowns ORDER BY sent_at DESC LIMIT 10 ORDER BY created_at DESC LIMIT %s""", (limit,))
+        # [R&D FIX]: Fixed UNION ALL syntax error by wrapping subqueries properly for PostgreSQL
+        cur.execute("""
+            SELECT action, created_at FROM (
+                SELECT source AS action, created_at FROM reply_logs ORDER BY created_at DESC LIMIT 50
+            ) r
+            UNION ALL
+            SELECT action, created_at FROM (
+                SELECT 'Welcome DM' AS action, sent_at AS created_at FROM dm_cooldowns ORDER BY sent_at DESC LIMIT 10
+            ) d
+            ORDER BY created_at DESC LIMIT %s
+        """, (limit,))
         return cur.fetchall()
 
 def cleanup_old_data():
-    with get_db() as cur:
-        cur.execute("DELETE FROM processed_events WHERE created_at < NOW() - INTERVAL '7 days'")
-        cur.execute("DELETE FROM reply_logs WHERE created_at < NOW() - INTERVAL '30 days'")
-        cur.execute("DELETE FROM conversation_memory WHERE created_at < NOW() - INTERVAL '14 days'")
-        cur.execute("DELETE FROM human_handoff_cooldowns WHERE expires_at < NOW()")
-        cur.execute("DELETE FROM gemini_quotas WHERE usage_date < NOW() - INTERVAL '30 days'")
-
-def is_active_hours() -> bool:
-    ist_hour = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).hour
-    start = int(get_config("sleep_start") or 1)
-    end = int(get_config("sleep_end") or 6)
-    if start <= end: return not (start <= ist_hour < end)
-    else: return not (ist_hour >= start or ist_hour < end)
-
-def add_keyword(keyword: str, reply: str):
-    with get_db() as cur:
-        cur.execute("INSERT INTO custom_keywords (keyword, reply) VALUES (%s, %s) ON CONFLICT (keyword) DO UPDATE SET reply = EXCLUDED.reply", (keyword.lower().strip(), reply.strip()))
-
-def remove_keyword(keyword: str) -> bool:
-    with get_db() as cur:
-        cur.execute("DELETE FROM custom_keywords WHERE keyword = %s", (keyword.lower().strip(),))
-        return cur.rowcount > 0
-
-def list_keywords() -> list[dict]:
-    with get_db() as cur:
-        cur.execute("SELECT keyword, reply FROM custom_keywords ORDER BY created_at DESC")
-        return cur.fetchall()
-
-def get_keyword_reply(text: str) -> str | None:
-    lower_text = text.lower()
-    with get_db() as cur:
-        cur.execute("SELECT keyword, reply FROM custom_keywords")
-        for row in cur.fetchall():
-            if row["keyword"] in lower_text: return row["reply"]
-        return None
-
-def is_c2dm_enabled() -> bool: return get_config("c2dm_enabled") == "true"
-def toggle_c2dm(): set_config("c2dm_enabled", "false" if is_c2dm_enabled() else "true")
-
-def add_c2dm_trigger(keyword: str, public_reply: str, dm_message: str):
-    with get_db() as cur:
-        cur.execute("""INSERT INTO comment_to_dm (keyword, public_reply, dm_message) VALUES (%s, %s, %s) ON CONFLICT (keyword) DO UPDATE SET public_reply = EXCLUDED.public_reply, dm_message = EXCLUDED.dm_message, is_active = TRUE""", (keyword.lower().strip(), public_reply, dm_message))
-
-def get_c2dm_triggers() -> list[dict]:
-    with get_db() as cur:
-        cur.execute("SELECT * FROM comment_to_dm ORDER BY created_at DESC")
-        return cur.fetchall()
-
-def delete_c2dm_trigger(trigger_id: int):
-    with get_db() as cur: cur.execute("DELETE FROM comment_to_dm WHERE id = %s", (trigger_id,))
-
-def find_c2dm_trigger(text: str) -> dict | None:
-    lower_text = text.lower()
-    with get_db() as cur:
-        cur.execute("SELECT * FROM comment_to_dm WHERE is_active = TRUE")
-        for row in cur.fetchall():
-            if row["keyword"] in lower_text: return row
-        return None
-
-def set_telegram_state(chat_id: str, state_data: dict): set_config(f"tg_state_{chat_id}", json.dumps(state_data))
-
-def get_telegram_state(chat_id: str) -> dict | None:
-    raw = get_config(f"tg_state_{chat_id}")
-    if raw:
-        try: return json.loads(raw)
-        except Exception: pass
-    return None
-
-def clear_telegram_state(chat_id: str): set_config(f"tg_state_{chat_id}", "")
+    with get_db() as cur
