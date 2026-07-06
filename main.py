@@ -38,7 +38,6 @@ def start_memory_monitor():
                 _send(SETTINGS.telegram_chat_id, f"🚨 <b>High Memory Alert!</b>\nUsage: {mem}%")
     threading.Thread(target=monitor, daemon=True).start()
 
-# ✅ NEW: Auto-Retry Background Worker
 def start_auto_retry_worker():
     def worker():
         while True:
@@ -76,7 +75,7 @@ def _startup():
         init_db()
         start_db_keepalive()
         start_memory_monitor()
-        start_auto_retry_worker() # ✅ Start Auto-Retry
+        start_auto_retry_worker()
         register_telegram_webhook()
         check_and_send_festival_reminders()
         check_and_send_token_expiry_alert()
