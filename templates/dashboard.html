@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Krishna Verse AI | Dashboard</title>
+    <title>Krishna Verse AI | Enterprise Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600&amp;family=Inter:wght@300;400;600&amp;display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600&family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
     <style>
         :root { --bg: #0a0a0c; --card: rgba(20, 20, 25, 0.6); --border: rgba(255, 255, 255, 0.05); --gold: #d4af37; --saffron: #ff9933; }
         body { background: var(--bg); color: #e0e0e0; font-family: 'Inter', sans-serif; }
@@ -17,6 +17,9 @@
         .font-royal { font-family: 'Cinzel', serif; }
         .glow { box-shadow: 0 0 20px rgba(255, 153, 51, 0.15); }
         .stat-value { font-size: 2.5rem; font-weight: 600; background: linear-gradient(90deg, var(--saffron), var(--gold)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .bg-saffron\/20 { background-color: rgba(255, 153, 51, 0.2); }
+        .border-saffron\/50 { border-color: rgba(255, 153, 51, 0.5); }
+        .hover\:bg-saffron\/30:hover { background-color: rgba(255, 153, 51, 0.3); }
     </style>
 </head>
 <body class="min-h-screen p-4 md:p-8">
@@ -61,7 +64,7 @@
                 <button @click="panicMode()" class="px-6 py-3 bg-red-500/20 text-red-400 border border-red-500/50 rounded-xl hover:bg-red-500/30 transition">
                     🚨 Panic Mode
                 </button>
-                <button @click="retryFailed()" class="px-6 py-3 bg-blue-500/20 text-blue-400 border border-red-500/50 rounded-xl hover:bg-blue-500/30 transition">
+                <button @click="retryFailed()" class="px-6 py-3 bg-blue-500/20 text-blue-400 border border-blue-500/50 rounded-xl hover:bg-blue-500/30 transition">
                     🔄 Retry Failed Webhooks
                 </button>
             </div>
@@ -80,8 +83,8 @@
                     // Initialize Charts
                     this.latencyChart = new Chart(document.getElementById('latencyChart'), {
                         type: 'line',
-                        data: { labels: [], datasets: [{ label: 'Latency', data: [], borderColor: '#ff9933', tension: 0.4 }] },
-                        options: { responsive: true, scales: { y: { beginAtZero: true, grid: { color: '#2a2a35' } }, x: { grid: { display: false } } } }
+                        data: { labels: [], datasets: [{ label: 'Latency', data: [], borderColor: '#ff9933', tension: 0.4, fill: false }] },
+                        options: { responsive: true, scales: { y: { beginAtZero: true, grid: { color: '#2a2a35' }, ticks: { color: '#888' } }, x: { grid: { display: false }, ticks: { color: '#888' } } }, plugins: { legend: { labels: { color: '#e0e0e0' } } } }
                     });
                     this.modelChart = new Chart(document.getElementById('modelChart'), {
                         type: 'doughnut',
