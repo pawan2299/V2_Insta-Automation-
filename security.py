@@ -8,9 +8,8 @@ logger = logging.getLogger(__name__)
 
 def verify_signature(payload: bytes, signature: str) -> bool:
     if not SETTINGS.app_secret:
-        # ✅ FIX: Production में बिना Secret के Webhook accept करना खतरनाक है
-        logger.critical("🚨 APP_SECRET missing! Webhook verification is disabled. Please set APP_SECRET in Render.")
-        return True # Fallback for dev, but logged as critical
+        logger.critical("🚨 APP_SECRET missing — rejecting request (fail-closed)")
+        return False
     if not signature:
         return False
     try:
