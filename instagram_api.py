@@ -2,11 +2,41 @@ from __future__ import annotations
 import logging
 import requests
 import time
+import io
+from threading import Semaphore
+from PIL import Image
 from config import SETTINGS
 
 logger = logging.getLogger(__name__)
 GRAPH_BASE = "https://graph.facebook.com/v25.0"
 TIMEOUT = 10
+
+# ✅ NEW: Semaphore to prevent RAM overflow during image processing
+image_semaphore = Semaphore(1)
+
+def download_and_compress_image(url: str) -> bytes | None:
+    """Downloads and compresses image to max 512x512 and < 2MB."""
+    with image_semaphore:
+        try:
+            resp = requests.get(url, timeout=5)
+            if not resp.ok or len(resp.content) > 5 * 1024 * 1024: # Skip if > 5MB raw
+                return None
+            
+            img = Image.open(io.BytesIO(resp.content))
+            img = img.convert("RGB")
+            img.thumbnail((512, 512), Image.Resampling.LANCZOS)
+            
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", quality=85)
+            compressed = buffer.getvalue()
+            
+            if len(compressed) > 2 * 1024 * 1024: # Still > 2MB
+                return None # Fallback to text-only in bot_logic
+                
+            return compressed
+        except Exception as e:
+            logger.error(f"Image compression failed: {e}")
+            return None
 
 def _graph_post(endpoint: str, data: dict, token: str) -> bool:
     try:
