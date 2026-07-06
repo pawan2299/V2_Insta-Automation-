@@ -68,37 +68,36 @@ def handle_comment(comment_data: dict):
         reply = None
         reply_type = "unknown"
 
-        if _is_emoji_only(text):
+        # ✅ FIX: Keyword priority (Highest priority, before emoji/spam/AI checks)
+        reply = get_keyword_reply(text)
+        if reply:
+            reply_type = "keyword"
+        elif _is_emoji_only(text):
             reply = random.choice(EMOJI_REPLIES)
             reply_type = "emoji"
         else:
-            # ✅ CONSOLIDATED SPAM CHECK
-            is_spam = False
-            if _looks_suspicious(text):
-                if use_ai and is_spam_or_negative(text): is_spam = True
-            elif use_ai:
+            if len(text) > 15 and _looks_suspicious(text) and use_ai:
+                if is_spam_or_negative(text):
+                    logger.info(f"🛡️ [SPAM FILTERED] Comment: {text[:50]}...")
+                    log_reply(comment_id, from_id, "[Filtered Spam]", media_id)
+                    return
+            
+            if use_ai:
                 intent = classify_comment_intent(text)
-                if intent == "spam": is_spam = True
+                reply_type = intent
+                if intent == "spam":
+                    logger.info(f"🛡️ [AI FILTERED] Comment: {text[:50]}...")
+                    log_reply(comment_id, from_id, "[AI Filtered Spam]", media_id)
+                    return
                 elif intent in ("greeting", "praise"):
                     reply = random.choice(AESTHETIC_REPLIES)
-                    reply_type = intent
-            
-            if is_spam:
-                logger.info(f"🛡️ [SPAM FILTERED] Comment: {text[:50]}...")
-                log_reply(comment_id, from_id, "[Filtered Spam]", media_id)
-                return
+                else:
+                    details = get_media_details(media_id) if media_id else {}
+                    image_url = details.get("url") if details.get("type") == "IMAGE" else None
+                    post_caption = details.get("caption", "")
+                    reply = generate_reply(text, post_caption=post_caption, image_url=image_url)
             
             if reply is None:
-                reply = get_keyword_reply(text)
-                reply_type = "keyword"
-                
-            if reply is None and use_ai:
-                details = get_media_details(media_id) if media_id else {}
-                image_url = details.get("url") if details.get("type") == "IMAGE" else None
-                post_caption = details.get("caption", "")
-                reply = generate_reply(text, post_caption=post_caption, image_url=image_url)
-                reply_type = "ai"
-            elif reply is None:
                 reply = random.choice(AESTHETIC_REPLIES)
                 reply_type = "fallback"
 
