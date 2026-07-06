@@ -17,19 +17,18 @@ from instagram_api import reply_to_comment, send_dm, get_media_details
 
 logger = logging.getLogger(__name__)
 
+# ✅ NEW: Short, Cute, Natural Replies (No spammy "Please follow us" or heavy blessings)
 AESTHETIC_REPLIES = [
-    "Thank you so much for your kind words 🌸✨ Please follow us @krishna.verse.ai 🙏🏻❣️ Radhe Radhe! 🪷",
-    "Radhe Radhe! 🙏🏻🙏🏻🙏🏻 Thank you for your beautiful comment 🌺 Please follow @krishna.verse.ai ✨🧡",
-    "Jai Shri Krishna! 🦚✨ Your sweet words made our day 🌼 Please follow @krishna.verse.ai 🙏🏻❣️",
+    "Thank you so much! 🌸✨",
+    "Glad you liked it! 💛",
+    "Radhe Radhe ",
+    "So sweet of you! ",
+    "Hare Krishna ",
+    "Thank you! ",
 ]
-EMOJI_REPLIES = ["🙏🏻🙏🏻🙏🏻 Thank you! Please follow @krishna.verse.ai 🌸✨ Radhe Radhe! ❣️", "Radhe Radhe! 🪷✨ Please follow @krishna.verse.ai 🙏🏻🧡"]
-WELCOME_DM = "🌸 Radhe Radhe! Thank you so much for following @krishna.verse.ai! 🙏\nMay Lord Krishna's love always surround you. ✨\nJai Shri Krishna! 🦚"
-ESCALATION_ACK_DM = (
-    "Radhe Radhe 🙏\n\n"
-    "Thank you for reaching out! I have forwarded your message to the admin team. "
-    "They will review it personally and get back to you as soon as possible. ✨\n\n"
-    "Jai Shri Krishna! 🦚"
-)
+EMOJI_REPLIES = ["🙏🏻✨", "Radhe Radhe 🌸", "Thank you! 🥺💛", "Hare Krishna ✨"]
+WELCOME_DM = "🌸 Radhe Radhe! Glad to have you here. Hope you love our little Krishna videos! ✨"
+ESCALATION_ACK_DM = "Hi there! 👋 I've passed your message to the admin. They'll get back to you soon! ✨"
 
 def _is_emoji_only(text: str) -> bool:
     clean = re.sub(r'[\s!.,?@#\-_]', '', text)
@@ -47,9 +46,7 @@ def _looks_suspicious(text: str) -> bool:
 def handle_comment(comment_data: dict):
     if is_bot_paused() or not is_active_hours(): return
     comment_id = comment_data.get("id", "")
-    
-    # 🌟 FIX 3: NoneType Protection
-    text = (comment_data.get("text") or "").strip()
+    text = comment_data.get("text", "").strip()
     from_id = str(comment_data.get("from", {}).get("id", ""))
     media_id = comment_data.get("media_id", "")
     
@@ -117,7 +114,7 @@ def _notify_human_dm(sender_id: str, message_text: str):
     try:
         from telegram_bot import _send
         from config import SETTINGS
-        _send(SETTINGS.telegram_chat_id, f"📩 <b>DM Escalated to Admin!</b>\n\nFrom: <code>{sender_id}</code>\nMessage: {message_text[:200]}\n\n<i>(Bot locked for this user for 24h)</i>")
+        _send(SETTINGS.telegram_chat_id, f" <b>DM Escalated to Admin!</b>\n\nFrom: <code>{sender_id}</code>\nMessage: {message_text[:200]}\n\n<i>(Bot locked for this user for 24h)</i>")
     except Exception as e: logger.error(f"Notify human DM failed: {e}")
 
 def handle_dm(dm_data: dict):
@@ -125,8 +122,6 @@ def handle_dm(dm_data: dict):
     if dm_data.get("message", {}).get("is_echo", False): return
     
     sender_id = str(dm_data.get("sender", {}).get("id", ""))
-    
-    # 🌟 FIX 3: NoneType Protection
     message_text = (dm_data.get("message", {}).get("text") or "").strip()
     message_id = dm_data.get("message", {}).get("mid", "")
     
@@ -139,14 +134,13 @@ def handle_dm(dm_data: dict):
     for att in attachments:
         if att.get("type") == "story_mention":
             logger.info(f"Story Mention detected from {sender_id}")
-            story_reply = generate_story_thank_you() or "🌸 Radhe Radhe! Thank you so much for sharing our content on your story! We truly appreciate your love and support. 🙏✨ Jai Shri Krishna! 🦚"
+            story_reply = generate_story_thank_you() or "🌸 Radhe Radhe! Thanks for sharing our content on your story! We truly appreciate it. ✨"
             if send_dm(sender_id, story_reply):
                 log_reply(message_id, sender_id, story_reply, source="story_mention")
                 save_dm_memory(sender_id, "bot", story_reply)
             return
 
     if not message_text: return
-
     if is_in_human_handoff(sender_id):
         logger.info(f"DM ignored (Human Handoff active) for {sender_id}")
         return
