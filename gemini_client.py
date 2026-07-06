@@ -1,7 +1,5 @@
 from __future__ import annotations
 import logging
-
-model_usage_counter = {m["id"]: 0 for m in MODEL_CONFIGS}
 import time
 import json
 import re
@@ -11,18 +9,21 @@ from collections import deque
 from google import genai
 from google.genai import types
 from config import SETTINGS
-from database import get_config, set_config, get_model_rpd, increment_gemini_count, get_recent_replies, save_dm_memory, get_dm_memory
+from database import (
+    get_config, set_config, get_model_rpd, increment_gemini_count,
+    get_recent_replies, save_dm_memory, get_dm_memory,
+    get_conversation_summary, save_conversation_summary, trim_old_memories
+)
 
 logger = logging.getLogger(__name__)
-
 _clients: list[genai.Client] = []
 
 def _init_clients():
     global _clients
     _clients = [genai.Client(api_key=k) for k in SETTINGS.gemini_api_keys if k]
-
 _init_clients()
 
+# ✅ MODEL_CONFIGS को सबसे पहले define किया (इसके बाद ही model_usage_counter use होगा)
 MODEL_CONFIGS = [
     {"id": "gemini-3.5-flash", "rpm": 10, "rpd": 1500, "label": "3.5 Flash (Core)"},
     {"id": "gemini-3.1-flash-lite", "rpm": 15, "rpd": 1500, "label": "3.1 Lite (Filters)"},
@@ -30,6 +31,8 @@ MODEL_CONFIGS = [
     {"id": "gemini-2.5-flash", "rpm": 10, "rpd": 1500, "label": "2.5 Flash (Fallback)"},
 ]
 
+# ✅ अब यह MODEL_CONFIGS के बाद है - Error fix हो गया!
+model_usage_counter = {m["id"]: 0 for m in MODEL_CONFIGS}
 _model_rpm_calls: dict[str, deque] = {m["id"]: deque() for m in MODEL_CONFIGS}
 
 def _record_call(model_id: str):
@@ -42,81 +45,83 @@ def _clean_json_string(text: str) -> str:
     return text.strip()
 
 def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", image_url: str | None = None, response_schema: dict | None = None) -> str | None:
-    if task_type in ["spam", "dm_filter", "intent", "summary"]: 
+    if task_type in ["spam", "dm_filter", "intent", "summary"]:
         models_to_try = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
-    elif task_type == "dm": 
+    elif task_type == "dm":
         models_to_try = ["gemini-3.5-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
-    else: 
+    else:
         models_to_try = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
 
     contents = [prompt]
     
-    # [R&D FIX]: Safe Image Download with strict size limits to prevent OOM on 512MB RAM
+    # ✅ Safe Image Download with strict 2MB limit
     if image_url:
         try:
             head_resp = requests.head(image_url, timeout=3, allow_redirects=True)
             content_length = int(head_resp.headers.get('Content-Length', 0))
-            # Strict limit: 2MB max to protect Render Free Tier RAM
             if 0 < content_length < 2 * 1024 * 1024:
                 img_data = requests.get(image_url, timeout=5).content
                 contents.append(types.Part.from_bytes(data=img_data, mime_type="image/jpeg"))
-                del img_data # Free memory immediately
+                del img_data
         except Exception as e:
-            logger.warning(f"Image download failed for {image_url}: {e}")
+            logger.warning(f"⚠️ Image download skipped for {image_url}: {e}")
 
     config_kwargs = {"max_output_tokens": max_length, "temperature": 0.9, "top_p": 0.95}
     if response_schema:
         config_kwargs["response_mime_type"] = "application/json"
         config_kwargs["response_schema"] = response_schema
         config_kwargs["temperature"] = 0.1
-
+        
     config = types.GenerateContentConfig(**config_kwargs)
 
-    for client in _clients:
+    for client_idx, client in enumerate(_clients):
         for model_id in models_to_try:
-            until = get_config(f"cooldown_{model_id}")
-            if until and until != "0" and time.time() < float(until): 
+            # ✅ Per-Key Cooldown Check
+            until = get_config(f"cooldown_{model_id}_{client_idx}")
+            if until and until != "0" and time.time() < float(until):
                 continue
-
+            
             calls = _model_rpm_calls[model_id]
             now = time.time()
-            while calls and now - calls[0] > 60: 
+            while calls and now - calls[0] > 60:
                 calls.popleft()
-
+            
             model_conf = next((m for m in MODEL_CONFIGS if m["id"] == model_id), None)
-            if not model_conf or len(calls) >= model_conf["rpm"]: 
+            if not model_conf or len(calls) >= model_conf["rpm"]:
                 continue
-            if get_model_rpd(model_id) >= model_conf["rpd"]: 
+            if get_model_rpd(model_id) >= model_conf["rpd"]:
                 continue
-
+            
             try:
                 start_time = time.time()
                 resp = client.models.generate_content(model=model_id, contents=contents, config=config)
                 latency_ms = (time.time() - start_time) * 1000
                 _record_call(model_id)
                 set_config("consecutive_429s", "0")
+                
                 logger.info(f"✅ Gemini API Success: {model_id} | Latency: {latency_ms:.0f}ms | Task: {task_type}")
+                
                 global model_usage_counter
                 model_usage_counter[model_id] += 1
                 if model_usage_counter[model_id] % 50 == 0:
                     logger.info(f"📊 Model {model_id} usage: {model_usage_counter[model_id]} calls")
                 
-                # [R&D FIX]: Force Garbage Collection after heavy AI call
-                gc.collect() 
-                
+                gc.collect()
                 return (resp.text or "").strip()
+                
             except Exception as e:
                 latency_ms = (time.time() - start_time) * 1000 if 'start_time' in locals() else 0
                 error_msg = str(e)
-                logger.error(f"❌ Gemini API Failed: {model_id} | Latency: {latency_ms:.0f}ms | Task: {task_type} | Error: {error_msg}")
+                logger.error(f"❌ Gemini API Failed: {model_id} | Latency: {latency_ms:.0f}ms | Error: {error_msg}")
+                
                 if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                    set_config(f"cooldown_{model_id}", str(time.time() + 300))
+                    set_config(f"cooldown_{model_id}_{client_idx}", str(time.time() + 300))
                     continue
-                elif "400" in error_msg and "SAFETY" in error_msg: 
+                elif "400" in error_msg and "SAFETY" in error_msg:
                     return None
-                else: 
+                else:
                     break
-                    
+    
     gc.collect()
     return None
 
@@ -133,11 +138,9 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
         "RULES:\n"
         "- Keep replies VERY short (under 15 words).\n"
         "- Be cute, warm, and conversational.\n"
-        "- NEVER use heavy devotional blessings (e.g., 'May Krishna bless you', 'Stay blessed', 'Jai Shri Krishna 🦚'). They feel awkward and robotic.\n"
+        "- NEVER use heavy devotional blessings.\n"
         "- NEVER ask people to follow in every reply.\n"
         "- Match the user's language (Hindi/English/Hinglish).\n"
-        "- If they say 'Radhe Radhe', just say 'Radhe Radhe 🌸' back. Don't overdo it.\n"
-        "- If they praise the video, react naturally (e.g., 'Glad you liked it! 🥺💛' or 'Right? The little flute is so cute ').\n"
         "- Do NOT use markdown formatting like **bold**.\n"
         "Output ONLY the exact reply text. No prefixes, no quotes.\n"
         f"{history_context}{visual_instr}{context}\n"
@@ -145,9 +148,8 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
     )
     result = _generate(prompt, max_length=150, task_type="comment", image_url=image_url)
     if not result: return None
-    
     text = result.strip()
-    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")): 
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
         text = text[1:-1]
     text = text.replace("**", "").replace("*", "").replace('"', '').replace('\n', ' ').replace('\r', '').strip()
     while "  " in text: text = text.replace("  ", " ")
@@ -155,19 +157,18 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
 
 def generate_dm_reply(message_text: str, user_id: str) -> str | None:
     if not can_use_gemini(): return None
-    history = get_dm_memory(user_id, 5)
+    
+    summary = get_conversation_summary(user_id)
+    history = get_dm_memory(user_id, 3)
     history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in history]) if history else ""
-    if history_str: history_str = f"\nPrevious Conversation:\n{history_str}\n"
+    summary_context = f"\n[Long-term Context Summary]: {summary}\n" if summary else ""
     
     prompt = (
         "You manage Instagram DMs for @krishna.verse.ai. You are a friendly, aesthetic page admin. "
-        "NEVER sound like a chatbot or a priest. NEVER mention AI. "
-        "RULES:\n"
-        "- Keep replies short, natural, and conversational.\n"
-        "- NEVER use heavy blessings or preachy sentences.\n"
-        "- Match their language (Hindi/English/Hinglish).\n"
-        "- If they ask 'Is this AI?': Answer honestly but casually (e.g., 'Haan, AI ki madad se banaye hain, par bahut pyaar se ✨').\n"
-        f"{history_str}Follower's new message: {message_text}\nYour reply:"
+        "NEVER sound like a chatbot. NEVER mention AI unless asked.\n"
+        f"{summary_context}"
+        f"Recent Messages:\n{history_str}\n"
+        f"Follower's new message: {message_text}\nYour reply:"
     )
     return _generate(prompt, max_length=300, task_type="dm")
 
@@ -211,7 +212,6 @@ def _gemini_should_reply_dm(text: str, user_id: str) -> bool:
     history = get_dm_memory(user_id, 5)
     history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in history]) if history else ""
     if history_str: history_str = f"\nContext:\n{history_str}\n"
-    
     prompt = (f"Classify DM:\nBOT_REPLY = greetings, praise, emojis, simple questions.\nHUMAN_REPLY = business, collabs, payments, complaints.\n{history_str}New Message: {text}\n")
     schema = {"type": "OBJECT", "properties": {"action": {"type": "STRING", "enum": ["BOT_REPLY", "HUMAN_REPLY"]}}, "required": ["action"]}
     result = _generate(prompt, max_length=50, task_type="dm_filter", response_schema=schema)
@@ -270,7 +270,6 @@ def generate_festival_list(years: list[int]) -> list[dict] | None:
     )
     result = _generate(prompt, max_length=4000, task_type="dm")
     if not result: return None
-    
     result = re.sub(r'^```(?:json)?\s*', '', result.strip(), flags=re.IGNORECASE)
     result = re.sub(r'\s*```$', '', result.strip())
     try:
