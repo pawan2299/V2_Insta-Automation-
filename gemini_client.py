@@ -3,6 +3,7 @@ import logging
 import time
 import json
 import re
+import gc
 import requests
 from collections import deque
 from google import genai
@@ -11,11 +12,13 @@ from config import SETTINGS
 from database import get_config, set_config, get_model_rpd, increment_gemini_count, get_recent_replies, save_dm_memory, get_dm_memory
 
 logger = logging.getLogger(__name__)
+
 _clients: list[genai.Client] = []
 
 def _init_clients():
     global _clients
     _clients = [genai.Client(api_key=k) for k in SETTINGS.gemini_api_keys if k]
+
 _init_clients()
 
 MODEL_CONFIGS = [
@@ -24,6 +27,7 @@ MODEL_CONFIGS = [
     {"id": "gemini-2.5-pro", "rpm": 5, "rpd": 50, "label": "2.5 Pro (Deep)"},
     {"id": "gemini-2.5-flash", "rpm": 10, "rpd": 1500, "label": "2.5 Flash (Fallback)"},
 ]
+
 _model_rpm_calls: dict[str, deque] = {m["id"]: deque() for m in MODEL_CONFIGS}
 
 def _record_call(model_id: str):
@@ -36,53 +40,75 @@ def _clean_json_string(text: str) -> str:
     return text.strip()
 
 def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", image_url: str | None = None, response_schema: dict | None = None) -> str | None:
-    if task_type in ["spam", "dm_filter", "intent"]: models_to_try = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
-    elif task_type == "dm": models_to_try = ["gemini-3.5-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
-    else: models_to_try = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
+    if task_type in ["spam", "dm_filter", "intent"]: 
+        models_to_try = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
+    elif task_type == "dm": 
+        models_to_try = ["gemini-3.5-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
+    else: 
+        models_to_try = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
 
     contents = [prompt]
+    
+    # [R&D FIX]: Safe Image Download with strict size limits to prevent OOM on 512MB RAM
     if image_url:
         try:
             head_resp = requests.head(image_url, timeout=3, allow_redirects=True)
             content_length = int(head_resp.headers.get('Content-Length', 0))
-            if 0 < content_length < 4 * 1024 * 1024:
+            # Strict limit: 2MB max to protect Render Free Tier RAM
+            if 0 < content_length < 2 * 1024 * 1024:
                 img_data = requests.get(image_url, timeout=5).content
                 contents.append(types.Part.from_bytes(data=img_data, mime_type="image/jpeg"))
-        except Exception: pass
+                del img_data # Free memory immediately
+        except Exception as e:
+            logger.warning(f"Image download failed for {image_url}: {e}")
 
     config_kwargs = {"max_output_tokens": max_length, "temperature": 0.9, "top_p": 0.95}
     if response_schema:
         config_kwargs["response_mime_type"] = "application/json"
         config_kwargs["response_schema"] = response_schema
         config_kwargs["temperature"] = 0.1
+
     config = types.GenerateContentConfig(**config_kwargs)
 
     for client in _clients:
         for model_id in models_to_try:
             until = get_config(f"cooldown_{model_id}")
-            if until and until != "0" and time.time() < float(until): continue
+            if until and until != "0" and time.time() < float(until): 
+                continue
+
             calls = _model_rpm_calls[model_id]
             now = time.time()
-            while calls and now - calls[0] > 60: calls.popleft()
+            while calls and now - calls[0] > 60: 
+                calls.popleft()
+
             model_conf = next((m for m in MODEL_CONFIGS if m["id"] == model_id), None)
-            if not model_conf or len(calls) >= model_conf["rpm"]: continue
-            if get_model_rpd(model_id) >= model_conf["rpd"]: continue
+            if not model_conf or len(calls) >= model_conf["rpm"]: 
+                continue
+            if get_model_rpd(model_id) >= model_conf["rpd"]: 
+                continue
 
             try:
                 resp = client.models.generate_content(model=model_id, contents=contents, config=config)
                 _record_call(model_id)
                 set_config("consecutive_429s", "0")
+                
+                # [R&D FIX]: Force Garbage Collection after heavy AI call
+                gc.collect() 
+                
                 return (resp.text or "").strip()
             except Exception as e:
                 error_msg = str(e)
                 if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
                     set_config(f"cooldown_{model_id}", str(time.time() + 300))
                     continue
-                elif "400" in error_msg and "SAFETY" in error_msg: return None
-                else: break
+                elif "400" in error_msg and "SAFETY" in error_msg: 
+                    return None
+                else: 
+                    break
+                    
+    gc.collect()
     return None
 
-# ✅ NEW: Cute, Short, Natural Admin Persona (No heavy blessings)
 def generate_reply(comment_text: str, post_caption: str = "", image_url: str | None = None) -> str | None:
     if not can_use_gemini(): return None
     visual_instr = "\nAnalyze the post image to make your reply specific to the visual content." if image_url else ""
@@ -106,11 +132,12 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
         f"{history_context}{visual_instr}{context}\n"
         f"Comment: {comment_text}"
     )
-    
     result = _generate(prompt, max_length=150, task_type="comment", image_url=image_url)
     if not result: return None
+    
     text = result.strip()
-    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")): text = text[1:-1]
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")): 
+        text = text[1:-1]
     text = text.replace("**", "").replace("*", "").replace('"', '').replace('\n', ' ').replace('\r', '').strip()
     while "  " in text: text = text.replace("  ", " ")
     return text
@@ -173,6 +200,7 @@ def _gemini_should_reply_dm(text: str, user_id: str) -> bool:
     history = get_dm_memory(user_id, 5)
     history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in history]) if history else ""
     if history_str: history_str = f"\nContext:\n{history_str}\n"
+    
     prompt = (f"Classify DM:\nBOT_REPLY = greetings, praise, emojis, simple questions.\nHUMAN_REPLY = business, collabs, payments, complaints.\n{history_str}New Message: {text}\n")
     schema = {"type": "OBJECT", "properties": {"action": {"type": "STRING", "enum": ["BOT_REPLY", "HUMAN_REPLY"]}}, "required": ["action"]}
     result = _generate(prompt, max_length=50, task_type="dm_filter", response_schema=schema)
@@ -197,7 +225,7 @@ def get_model_status() -> str:
     for model in MODEL_CONFIGS:
         mid = model["id"]
         used = get_model_rpd(mid)
-        limit = model["rpd"] * total_pool 
+        limit = model["rpd"] * total_pool
         pct = int(used / limit * 100) if limit > 0 else 0
         icon = "🟢" if pct < 50 else ("🟡" if pct < 80 else "🔴")
         lines.append(f"{icon} {model['label']}: {used}/{limit}")
@@ -208,14 +236,8 @@ def generate_weekly_insight(stats: dict) -> str | None:
     prompt = f"Social media analyst for @krishna.verse.ai.\nThis week: {stats.get('total_comments_replied', 0)} replies, {stats.get('welcome_dms_sent', 0)} DMs.\nGive 3 practical growth suggestions. Under 100 words."
     return _generate(prompt, max_length=500, task_type="dm")
 
-# ... [File ke upar ka poora code bilkul waisa hi rahega] ...
-
-# 🌟 NEW: Dynamic Festival Fetcher using existing Gemini API
 def generate_festival_list(years: list[int]) -> list[dict] | None:
-    """Fetches accurate Hindu festival dates and ideas from Gemini."""
-    if not can_use_gemini(): 
-        return None
-        
+    if not can_use_gemini(): return None
     prompt = (
         f"You are an expert in the Hindu Panchang and a creative social media manager for a devotional page. "
         f"List all major Hindu festivals for the years {years[0]} and {years[1]}. "
@@ -223,21 +245,14 @@ def generate_festival_list(years: list[int]) -> list[dict] | None:
         "Return ONLY a valid JSON array of objects. Do not use markdown code blocks. "
         "Format: [{\"name\": \"Festival Name\", \"date\": \"YYYY-MM-DD\", \"ideas\": [\"idea 1\", \"idea 2\", \"idea 3\"]}]"
     )
+    result = _generate(prompt, max_length=4000, task_type="dm")
+    if not result: return None
     
-    # Use a high token limit since the list will be long
-    result = _generate(prompt, max_length=4000, task_type="dm") 
-    if not result: 
-        return None
-        
-    # Clean JSON string (remove accidental markdown blocks)
-    import re
     result = re.sub(r'^```(?:json)?\s*', '', result.strip(), flags=re.IGNORECASE)
     result = re.sub(r'\s*```$', '', result.strip())
-    
     try:
         parsed = json.loads(result)
-        if isinstance(parsed, list) and len(parsed) > 0:
-            return parsed
+        if isinstance(parsed, list) and len(parsed) > 0: return parsed
         return None
     except json.JSONDecodeError:
         logger.error(f"Failed to parse festival JSON from Gemini: {result[:200]}")
