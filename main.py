@@ -136,6 +136,7 @@ def webhook():
     data = request.get_json(silent=True) or {}
     
     start_time = time.time()
+    event_count = 0
     is_error = False
     
     def process():
@@ -146,6 +147,8 @@ def webhook():
             if not _check_rate_limit(): return
             
             for entry in data.get("entry", []):
+                event_count += len(entry.get("messaging", []))
+                event_count += len(entry.get("changes", []))
                 for msg in entry.get("messaging", []): handle_dm(msg)
                 for change in entry.get("changes", []):
                     if change.get("field") == "comments": handle_comment(change.get("value", {}))
@@ -157,6 +160,9 @@ def webhook():
             # ✅ NEW: Record Metrics
             webhook_metrics.append(time.time() - start_time)
             error_metrics.append(1 if is_error else 0)
+            processing_time = time.time() - start_time
+            queue_depth = executor._work_queue.qsize() if hasattr(executor, '_work_queue') else -1
+            logger.info(f"✅ Webhook processed: {event_count} events in {processing_time:.2f}s | Queue Depth: {queue_depth}")
 
     executor.submit(process)
     return "OK", 200

@@ -38,37 +38,53 @@ def download_and_compress_image(url: str) -> bytes | None:
             logger.error(f"Image compression failed: {e}")
             return None
 
-def _graph_post(endpoint: str, data: dict, token: str) -> bool:
+def _graph_post(endpoint: str, data: dict, token: str, method: str = "POST") -> bool:
     try:
-        resp = requests.post(f"{GRAPH_BASE}/{endpoint}", params={"access_token": token}, json=data, timeout=TIMEOUT)
-        if resp.ok: return True
-        logger.error(f"Graph API Failed: {resp.status_code} | {resp.text}")
+        start_time = time.time()
+        resp = requests.request(method, f"{GRAPH_BASE}/{endpoint}", params={"access_token": token}, json=data, timeout=TIMEOUT)
+        latency_ms = (time.time() - start_time) * 1000
+        if resp.ok:
+            logger.info(f"✅ Instagram API Success: {endpoint} | Latency: {latency_ms:.0f}ms | Status: {resp.status_code}")
+            return True
+        logger.error(f"❌ Instagram API Failed: {endpoint} | Latency: {latency_ms:.0f}ms | Status: {resp.status_code} | Response: {resp.text}")
         return False
     except requests.RequestException: return False
 
 def reply_to_comment(comment_id: str, message: str) -> bool:
-    return _graph_post(f"{comment_id}/replies", {"message": message}, SETTINGS.ig_user_token)
+    logger.info(f"Attempting to reply to comment {comment_id} with message: {message[:50]}...")
+    return _graph_post(f"{comment_id}/replies", {"message": message}, SETTINGS.ig_user_token, method="POST")
 
 def send_dm(user_id: str, message: str) -> bool:
+    logger.info(f"Attempting to send DM to {user_id} with message: {message[:50]}...")
     message = message.replace("@", "")
     headers = {"Authorization": f"Bearer {SETTINGS.dm_access_token}", "Content-Type": "application/json"}
     try:
+        start_time = time.time()
         resp = requests.post("https://graph.instagram.com/v25.0/me/messages", headers=headers, json={"recipient": {"id": user_id}, "message": {"text": message}}, timeout=TIMEOUT)
-        if resp.ok: return True
-        logger.error(f"DM Failed: {resp.status_code} | {resp.text}")
+        latency_ms = (time.time() - start_time) * 1000
+        if resp.ok:
+            logger.info(f"✅ Instagram DM Success: {user_id} | Latency: {latency_ms:.0f}ms | Status: {resp.status_code}")
+            return True
+        logger.error(f"❌ Instagram DM Failed: {user_id} | Latency: {latency_ms:.0f}ms | Status: {resp.status_code} | Response: {resp.text}")
         return False
     except requests.RequestException: return False
 
 def get_media_details(media_id: str) -> dict:
+    logger.info(f"Fetching media details for {media_id}")
     try:
+        start_time = time.time()
         resp = requests.get(f"{GRAPH_BASE}/{media_id}", params={"fields": "media_url,permalink,caption,media_type", "access_token": SETTINGS.ig_user_token}, timeout=TIMEOUT)
+        latency_ms = (time.time() - start_time) * 1000
         if resp.ok:
             data = resp.json()
+            logger.info(f"✅ Media details fetched for {media_id} | Latency: {latency_ms:.0f}ms | Status: {resp.status_code}")
             return {"url": data.get("media_url"), "caption": data.get("caption", ""), "type": data.get("media_type", "")}
+        logger.error(f"❌ Failed to fetch media details for {media_id} | Latency: {latency_ms:.0f}ms | Status: {resp.status_code} | Response: {resp.text}")
         return {}
     except Exception: return {}
 
 def check_token_validity(token_type: str = "ig_user") -> bool:
+    logger.info(f"Checking token validity for {token_type}")
     token = SETTINGS.ig_user_token if token_type == "ig_user" else SETTINGS.page_access_token
     try:
         resp = requests.get("https://graph.facebook.com/debug_token", params={"input_token": token, "access_token": token}, timeout=10)
@@ -77,6 +93,7 @@ def check_token_validity(token_type: str = "ig_user") -> bool:
     except Exception: return False
 
 def get_token_expiry_days(token_type: str = "ig_user") -> int | None:
+    logger.info(f"Getting token expiry days for {token_type}")
     token = SETTINGS.ig_user_token if token_type == "ig_user" else SETTINGS.page_access_token
     try:
         resp = requests.get("https://graph.facebook.com/debug_token", params={"input_token": token, "access_token": token}, timeout=10)

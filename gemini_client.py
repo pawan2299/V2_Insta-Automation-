@@ -1,5 +1,7 @@
 from __future__ import annotations
 import logging
+
+model_usage_counter = {m["id"]: 0 for m in MODEL_CONFIGS}
 import time
 import json
 import re
@@ -88,16 +90,25 @@ def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", im
                 continue
 
             try:
+                start_time = time.time()
                 resp = client.models.generate_content(model=model_id, contents=contents, config=config)
+                latency_ms = (time.time() - start_time) * 1000
                 _record_call(model_id)
                 set_config("consecutive_429s", "0")
+                logger.info(f"✅ Gemini API Success: {model_id} | Latency: {latency_ms:.0f}ms | Task: {task_type}")
+                global model_usage_counter
+                model_usage_counter[model_id] += 1
+                if model_usage_counter[model_id] % 50 == 0:
+                    logger.info(f"📊 Model {model_id} usage: {model_usage_counter[model_id]} calls")
                 
                 # [R&D FIX]: Force Garbage Collection after heavy AI call
                 gc.collect() 
                 
                 return (resp.text or "").strip()
             except Exception as e:
+                latency_ms = (time.time() - start_time) * 1000 if 'start_time' in locals() else 0
                 error_msg = str(e)
+                logger.error(f"❌ Gemini API Failed: {model_id} | Latency: {latency_ms:.0f}ms | Task: {task_type} | Error: {error_msg}")
                 if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
                     set_config(f"cooldown_{model_id}", str(time.time() + 300))
                     continue
