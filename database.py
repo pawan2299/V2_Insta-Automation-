@@ -10,6 +10,7 @@ from psycopg2.extras import RealDictCursor
 from config import SETTINGS
 
 logger = logging.getLogger(__name__)
+
 _pool: pool.ThreadedConnectionPool | None = None
 _pool_lock = threading.Lock()
 
@@ -22,11 +23,12 @@ def init_pool(force: bool = False):
             except Exception: pass
             _pool = None
         try:
+            # [R&D FIX]: Reduced maxconn to 3 to prevent "Too many clients" error on Neon Free Tier
             _pool = pool.ThreadedConnectionPool(
-                minconn=1, maxconn=8, dsn=SETTINGS.database_url,
+                minconn=1, maxconn=3, dsn=SETTINGS.database_url,
                 cursor_factory=RealDictCursor, connect_timeout=5,
             )
-            logger.info("DB pool initialized.")
+            logger.info("DB pool initialized (maxconn=3).")
         except Exception as e:
             logger.error(f"Failed to initialize DB pool: {e}")
             _pool = None
@@ -40,17 +42,23 @@ def get_db():
         if _pool is None or getattr(_pool, 'closed', False):
             logger.warning("DB pool closed. Reinitializing...")
             init_pool(force=True)
+            
         conn = _pool.getconn()
+        
+        # [R&D FIX]: Micro Health Check to detect stale connections instantly
         try:
-            with conn.cursor() as test_cur: test_cur.execute("SELECT 1")
+            with conn.cursor() as test_cur: 
+                test_cur.execute("SELECT 1")
         except Exception:
-            logger.warning("Stale connection, recreating pool.")
+            logger.warning("Stale connection detected, dropping and recreating pool.")
             try: _pool.putconn(conn, close=True)
             except Exception: pass
             conn = None
             init_pool(force=True)
             conn = _pool.getconn()
-        with conn.cursor() as cur: yield cur
+            
+        with conn.cursor() as cur: 
+            yield cur
         conn.commit()
     except Exception:
         if conn:
@@ -74,7 +82,6 @@ def init_db():
         cur.execute("""CREATE TABLE IF NOT EXISTS comment_to_dm (id SERIAL PRIMARY KEY, keyword TEXT UNIQUE NOT NULL, public_reply TEXT NOT NULL, dm_message TEXT NOT NULL, is_active BOOLEAN DEFAULT TRUE, created_at TIMESTAMPTZ DEFAULT NOW())""")
         cur.execute("""CREATE TABLE IF NOT EXISTS dm_cooldowns (user_id TEXT PRIMARY KEY, sent_at TIMESTAMPTZ DEFAULT NOW())""")
         cur.execute("""CREATE TABLE IF NOT EXISTS human_handoff_cooldowns (user_id TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL)""")
-        
         cur.execute("""INSERT INTO system_config (key, value) VALUES ('bot_paused', 'false'), ('gemini_enabled', 'true'), ('safe_mode', 'false'), ('consecutive_429s', '0'), ('circuit_breaker_until', '0'), ('c2dm_enabled', 'true') ON CONFLICT DO NOTHING""")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_reply_logs_created ON reply_logs(created_at DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_conv_mem_user ON conversation_memory(user_id, created_at DESC)")
@@ -93,6 +100,7 @@ def set_config(key: str, value: str):
 def is_bot_paused() -> bool: return get_config("bot_paused") == "true"
 def is_gemini_enabled() -> bool: return get_config("gemini_enabled") == "true"
 def is_safe_mode() -> bool: return get_config("safe_mode") == "true"
+
 def is_circuit_breaker_active() -> bool:
     cb_until = get_config("circuit_breaker_until")
     if cb_until and cb_until != "0":
@@ -220,32 +228,38 @@ def get_keyword_reply(text: str) -> str | None:
         cur.execute("SELECT keyword, reply FROM custom_keywords")
         for row in cur.fetchall():
             if row["keyword"] in lower_text: return row["reply"]
-    return None
+        return None
 
 def is_c2dm_enabled() -> bool: return get_config("c2dm_enabled") == "true"
 def toggle_c2dm(): set_config("c2dm_enabled", "false" if is_c2dm_enabled() else "true")
+
 def add_c2dm_trigger(keyword: str, public_reply: str, dm_message: str):
     with get_db() as cur:
         cur.execute("""INSERT INTO comment_to_dm (keyword, public_reply, dm_message) VALUES (%s, %s, %s) ON CONFLICT (keyword) DO UPDATE SET public_reply = EXCLUDED.public_reply, dm_message = EXCLUDED.dm_message, is_active = TRUE""", (keyword.lower().strip(), public_reply, dm_message))
+
 def get_c2dm_triggers() -> list[dict]:
     with get_db() as cur:
         cur.execute("SELECT * FROM comment_to_dm ORDER BY created_at DESC")
         return cur.fetchall()
+
 def delete_c2dm_trigger(trigger_id: int):
     with get_db() as cur: cur.execute("DELETE FROM comment_to_dm WHERE id = %s", (trigger_id,))
+
 def find_c2dm_trigger(text: str) -> dict | None:
     lower_text = text.lower()
     with get_db() as cur:
         cur.execute("SELECT * FROM comment_to_dm WHERE is_active = TRUE")
         for row in cur.fetchall():
             if row["keyword"] in lower_text: return row
-    return None
+        return None
 
 def set_telegram_state(chat_id: str, state_data: dict): set_config(f"tg_state_{chat_id}", json.dumps(state_data))
+
 def get_telegram_state(chat_id: str) -> dict | None:
     raw = get_config(f"tg_state_{chat_id}")
     if raw:
         try: return json.loads(raw)
         except Exception: pass
     return None
+
 def clear_telegram_state(chat_id: str): set_config(f"tg_state_{chat_id}", "")
