@@ -21,9 +21,9 @@ def _require(key: str) -> str:
 @dataclass(frozen=True)
 class Settings:
     verify_token: str
-    access_token: str  
-    ig_user_token: str 
-    page_access_token: str 
+    access_token: str
+    ig_user_token: str
+    page_access_token: str
     app_secret: str
     page_id: str
     own_account_id: str
@@ -41,8 +41,6 @@ def _load() -> Settings:
     db_url = _require("DATABASE_URL")
     if "sslmode" not in db_url:
         db_url += ("&" if "?" in db_url else "?") + "sslmode=require"
-    
-    # ✅ Keepalives for Render Postgres
     if "keepalives" not in db_url:
         db_url += "&keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=6"
 
@@ -54,31 +52,22 @@ def _load() -> Settings:
     for i in range(1, 11):
         key_env = "GEMINI_API_KEY" if i == 1 else f"GEMINI_API_KEY_{i}"
         key = _get(key_env)
-        if key:
-            gemini_keys.append(key)
+        if key: gemini_keys.append(key)
 
     if not gemini_keys:
         logger.critical("Missing at least one GEMINI_API_KEY")
         sys.exit(1)
-        
-    logger.info(f"Loaded {len(gemini_keys)} Gemini API key(s)")
 
     return Settings(
-        verify_token=_require("VERIFY_TOKEN"),
-        access_token=main_token,
-        ig_user_token=ig_token,
-        page_access_token=page_token,
-        app_secret=_require("APP_SECRET"),
-        page_id=_require("PAGE_ID"),
-        own_account_id=_get("OWN_ACCOUNT_ID"),
-        gemini_api_keys=gemini_keys,  
-        database_url=db_url,
-        telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
+        verify_token=_require("VERIFY_TOKEN"), access_token=main_token,
+        ig_user_token=ig_token, page_access_token=page_token,
+        app_secret=_require("APP_SECRET"), page_id=_require("PAGE_ID"),
+        own_account_id=_get("OWN_ACCOUNT_ID"), gemini_api_keys=gemini_keys,
+        database_url=db_url, telegram_bot_token=_require("TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=_require("TELEGRAM_CHAT_ID"),
         dm_access_token=_get("DM_ACCESS_TOKEN", main_token),
         public_base_url=_get("PUBLIC_BASE_URL", "https://krishnav2.onrender.com"),
-        environment=_get("APP_ENV", "production"),
-        log_level=_get("LOG_LEVEL", "INFO"),
+        environment=_get("APP_ENV", "production"), log_level=_get("LOG_LEVEL", "INFO"),
         port=int(_get("PORT", "5000")),
     )
 
