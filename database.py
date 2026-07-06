@@ -110,6 +110,19 @@ def save_failed_webhook(event_id: str, payload: dict, error_msg: str):
     with get_db() as cur:
         cur.execute("""INSERT INTO failed_webhooks (event_id, payload, error_msg) VALUES (%s, %s, %s) ON CONFLICT (event_id) DO UPDATE SET error_msg = EXCLUDED.error_msg, retry_count = failed_webhooks.retry_count + 1""", (event_id, json.dumps(payload), error_msg))
 
+def get_and_lock_failed_webhooks(limit=10):
+    """Get failed webhooks that are old enough to retry (avoid racing with initial processing)."""
+    with get_db() as cur:
+        cur.execute("""
+            SELECT event_id, payload, error_msg, retry_count, created_at
+            FROM failed_webhooks
+            WHERE retry_count < 5
+              AND created_at < NOW() - INTERVAL '5 minutes'
+            ORDER BY created_at ASC
+            LIMIT %s
+        """, (limit,))
+        return cur.fetchall()
+
 def get_failed_webhooks(limit=10):
     with get_db() as cur:
         cur.execute("SELECT * FROM failed_webhooks ORDER BY created_at ASC LIMIT %s", (limit,))
