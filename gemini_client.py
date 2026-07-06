@@ -207,3 +207,38 @@ def generate_weekly_insight(stats: dict) -> str | None:
     if not can_use_gemini(): return None
     prompt = f"Social media analyst for @krishna.verse.ai.\nThis week: {stats.get('total_comments_replied', 0)} replies, {stats.get('welcome_dms_sent', 0)} DMs.\nGive 3 practical growth suggestions. Under 100 words."
     return _generate(prompt, max_length=500, task_type="dm")
+
+# ... [File ke upar ka poora code bilkul waisa hi rahega] ...
+
+# 🌟 NEW: Dynamic Festival Fetcher using existing Gemini API
+def generate_festival_list(years: list[int]) -> list[dict] | None:
+    """Fetches accurate Hindu festival dates and ideas from Gemini."""
+    if not can_use_gemini(): 
+        return None
+        
+    prompt = (
+        f"You are an expert in the Hindu Panchang and a creative social media manager for a devotional page. "
+        f"List all major Hindu festivals for the years {years[0]} and {years[1]}. "
+        "For each festival, provide 3 short, aesthetic content ideas for an AI-generated Little Krishna video page. "
+        "Return ONLY a valid JSON array of objects. Do not use markdown code blocks. "
+        "Format: [{\"name\": \"Festival Name\", \"date\": \"YYYY-MM-DD\", \"ideas\": [\"idea 1\", \"idea 2\", \"idea 3\"]}]"
+    )
+    
+    # Use a high token limit since the list will be long
+    result = _generate(prompt, max_length=4000, task_type="dm") 
+    if not result: 
+        return None
+        
+    # Clean JSON string (remove accidental markdown blocks)
+    import re
+    result = re.sub(r'^```(?:json)?\s*', '', result.strip(), flags=re.IGNORECASE)
+    result = re.sub(r'\s*```$', '', result.strip())
+    
+    try:
+        parsed = json.loads(result)
+        if isinstance(parsed, list) and len(parsed) > 0:
+            return parsed
+        return None
+    except json.JSONDecodeError:
+        logger.error(f"Failed to parse festival JSON from Gemini: {result[:200]}")
+        return None
