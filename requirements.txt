@@ -4,4 +4,4 @@ requests>=2.32.0
 psycopg2-binary>=2.9.9
 google-genai>=1.0.0
 python-dotenv>=1.0.1
-psutil>=5.9.0       # Memory usage monitoring
+psutil>=5.9.0
