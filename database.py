@@ -26,7 +26,7 @@ def init_pool(force: bool = False):
         try:
             # ✅ UPDATED: maxconn reduced from 8 to 4 to prevent Render OOM/Connection limits
             _pool = pool.ThreadedConnectionPool(
-                minconn=1, maxconn=4, dsn=SETTINGS.database_url,
+                minconn=1, maxconn=6, dsn=SETTINGS.database_url,
                 cursor_factory=RealDictCursor, connect_timeout=20,
             )
             logger.info("DB pool initialized (maxconn=4).")
