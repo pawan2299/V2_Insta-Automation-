@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en" x-data="dashboard()">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Krishna Verse AI | Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600&amp;family=Inter:wght@300;400;600&amp;display=swap" rel="stylesheet">
+    <style>
+        :root { --bg: #0a0a0c; --card: rgba(20, 20, 25, 0.6); --border: rgba(255, 255, 255, 0.05); --gold: #d4af37; --saffron: #ff9933; }
+        body { background: var(--bg); color: #e0e0e0; font-family: 'Inter', sans-serif; }
+        .glass { background: var(--card); backdrop-filter: blur(12px); border: 1px solid var(--border); border-radius: 1.5rem; }
+        .text-gold { color: var(--gold); }
+        .text-saffron { color: var(--saffron); }
+        .font-royal { font-family: 'Cinzel', serif; }
+        .glow { box-shadow: 0 0 20px rgba(255, 153, 51, 0.15); }
+        .stat-value { font-size: 2.5rem; font-weight: 600; background: linear-gradient(90deg, var(--saffron), var(--gold)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    </style>
+</head>
+<body class="min-h-screen p-4 md:p-8">
+    <div class="max-w-7xl mx-auto">
+        <header class="text-center mb-12">
+            <h1 class="font-royal text-4xl md:text-5xl text-gold glow inline-block px-6 py-2 rounded-2xl">🦚 Krishna Verse AI</h1>
+            <p class="text-gray-400 mt-4">Enterprise Admin Dashboard</p>
+        </header>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <div class="glass p-6 glow">
+                <p class="text-gray-400 text-sm">Total Replies</p>
+                <p class="stat-value" x-text="stats.total_replies">0</p>
+            </div>
+            <div class="glass p-6 glow">
+                <p class="text-gray-400 text-sm">Last 24h</p>
+                <p class="stat-value" x-text="stats.replies_24h">0</p>
+            </div>
+            <div class="glass p-6 glow">
+                <p class="text-gray-400 text-sm">System Status</p>
+                <p class="text-2xl font-bold mt-2" :class="stats.status_class" x-text="stats.status_text">Live</p>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <div class="glass p-6">
+                <h3 class="text-gold font-semibold mb-4">Webhook Latency (ms)</h3>
+                <canvas id="latencyChart"></canvas>
+            </div>
+            <div class="glass p-6">
+                <h3 class="text-gold font-semibold mb-4">AI Model Usage</h3>
+                <canvas id="modelChart"></canvas>
+            </div>
+        </div>
+
+        <div class="glass p-6 mb-8">
+            <h3 class="text-gold font-semibold mb-4">Action Center</h3>
+            <div class="flex flex-wrap gap-4">
+                <button @click="toggleBot()" class="px-6 py-3 bg-saffron/20 text-saffron border border-saffron/50 rounded-xl hover:bg-saffron/30 transition">
+                    <span x-text="stats.bot_paused ? '▶️ Resume Bot' : '⏸ Pause Bot'"></span>
+                </button>
+                <button @click="panicMode()" class="px-6 py-3 bg-red-500/20 text-red-400 border border-red-500/50 rounded-xl hover:bg-red-500/30 transition">
+                    🚨 Panic Mode
+                </button>
+                <button @click="retryFailed()" class="px-6 py-3 bg-blue-500/20 text-blue-400 border border-red-500/50 rounded-xl hover:bg-blue-500/30 transition">
+                    🔄 Retry Failed Webhooks
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function dashboard() {
+            return {
+                stats: { total_replies: 0, replies_24h: 0, status_text: 'Loading...', status_class: 'text-gray-400', bot_paused: false },
+                latencyChart: null,
+                modelChart: null,
+                init() {
+                    fetch('/api/stats').then(r => r.json()).then(data => this.stats = data);
+                    
+                    // Initialize Charts
+                    this.latencyChart = new Chart(document.getElementById('latencyChart'), {
+                        type: 'line',
+                        data: { labels: [], datasets: [{ label: 'Latency', data: [], borderColor: '#ff9933', tension: 0.4 }] },
+                        options: { responsive: true, scales: { y: { beginAtZero: true, grid: { color: '#2a2a35' } }, x: { grid: { display: false } } } }
+                    });
+                    this.modelChart = new Chart(document.getElementById('modelChart'), {
+                        type: 'doughnut',
+                        data: { labels: [], datasets: [{ data: [], backgroundColor: ['#ff9933', '#d4af37', '#4ade80', '#f87171'] }] },
+                        options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { color: '#e0e0e0' } } } }
+                    });
+
+                    // SSE for Live Updates
+                    const evtSource = new EventSource("/stream");
+                    evtSource.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        this.latencyChart.data.labels.push(new Date().toLocaleTimeString());
+                        this.latencyChart.data.datasets[0].data.push(data.latency);
+                        if (this.latencyChart.data.labels.length > 10) {
+                            this.latencyChart.data.labels.shift();
+                            this.latencyChart.data.datasets[0].data.shift();
+                        }
+                        this.latencyChart.update();
+                        
+                        this.modelChart.data.labels = data.models.map(m => m.label);
+                        this.modelChart.data.datasets[0].data = data.models.map(m => m.used);
+                        this.modelChart.update();
+                    };
+                },
+                toggleBot() { fetch('/api/toggle-bot', { method: 'POST' }).then(() => location.reload()); },
+                panicMode() { if(confirm('Enable Panic Mode?')) fetch('/api/panic', { method: 'POST' }).then(() => location.reload()); },
+                retryFailed() { fetch('/retry-failed-webhooks', { method: 'POST' }).then(r => r.json()).then(d => alert(d.message)); }
+            }
+        }
+    </script>
+</body>
+</html>
