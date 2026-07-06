@@ -140,7 +140,7 @@ def webhook():
     is_error = False
     
     def process():
-        nonlocal is_error
+        nonlocal is_error, event_count  # <--- बस यहाँ event_count add कर दिया
         try:
             check_and_send_festival_reminders()
             check_and_send_token_expiry_alert()
