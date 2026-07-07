@@ -12,7 +12,7 @@ from database import (
 )
 from gemini_client import (
     generate_reply, can_use_gemini, generate_dm_reply,
-    is_spam_or_negative, _gemini_should_reply_dm, classify_comment_intent, 
+    is_spam_or_negative, _gemini_should_reply_dm, classify_comment_intent,
     generate_story_thank_you, summarize_conversation
 )
 from instagram_api import reply_to_comment, send_dm, get_media_details
@@ -33,6 +33,7 @@ def _is_emoji_only(text: str) -> bool:
     return True
 
 SPAM_SIGNALS = {"follow", "check", "link", "bio", "giveaway", "free", "click", "promo", "dm me", "collab"}
+
 def _looks_suspicious(text: str) -> bool:
     lower = text.lower()
     if any(signal in lower for signal in SPAM_SIGNALS): return True
@@ -43,17 +44,19 @@ def handle_comment(comment_data: dict):
     start_time = time.time()
     try:
         if is_bot_paused() or not is_active_hours(): return
+        
         comment_id = comment_data.get("id", "")
         text = comment_data.get("text", "").strip()
         from_id = str(comment_data.get("from", {}).get("id", ""))
         media_id = comment_data.get("media_id", "")
         
         if not comment_id or not text or not from_id: return
+        
         from config import SETTINGS
         if from_id == SETTINGS.own_account_id: return
         if not claim_event(comment_id): return
         if is_already_replied(comment_id): return
-
+        
         if is_c2dm_enabled():
             trigger = find_c2dm_trigger(text)
             if trigger:
@@ -63,11 +66,11 @@ def handle_comment(comment_data: dict):
                     send_dm(from_id, trigger['dm_message'])
                 log_reply(comment_id, from_id, trigger['public_reply'], media_id, "c2dm")
                 return
-
+                
         use_ai = is_gemini_enabled() and not is_safe_mode()
         reply = None
         reply_type = "unknown"
-
+        
         # ✅ FIX: Keyword priority (Highest priority, before emoji/spam/AI checks)
         reply = get_keyword_reply(text)
         if reply:
@@ -81,7 +84,7 @@ def handle_comment(comment_data: dict):
                     logger.info(f"🛡️ [SPAM FILTERED] Comment: {text[:50]}...")
                     log_reply(comment_id, from_id, "[Filtered Spam]", media_id)
                     return
-            
+                    
             if use_ai:
                 intent = classify_comment_intent(text)
                 reply_type = intent
@@ -96,18 +99,21 @@ def handle_comment(comment_data: dict):
                     image_url = details.get("url") if details.get("type") == "IMAGE" else None
                     post_caption = details.get("caption", "")
                     reply = generate_reply(text, post_caption=post_caption, image_url=image_url)
-            
+                    
             if reply is None:
                 reply = random.choice(AESTHETIC_REPLIES)
                 reply_type = "fallback"
-
-        if reply and reply_to_comment(comment_id, reply):
-            log_reply(comment_id, from_id, reply, media_id, "comment")
-            latency = (time.time() - start_time) * 1000
-            logger.info(f"✅ Comment Replied [{reply_type}] | ID: {comment_id[:15]}... | Latency: {latency:.0f}ms")
-        else:
-            logger.error(f"❌ Comment Reply Failed | ID: {comment_id[:15]}...")
-            
+                
+        if reply:
+            # 🧠 Anti-Ban: Simulate human reading & typing time (2 to 7 seconds)
+            time.sleep(random.uniform(2.0, 7.0))
+            if reply_to_comment(comment_id, reply):
+                log_reply(comment_id, from_id, reply, media_id, "comment")
+                latency = (time.time() - start_time) * 1000
+                logger.info(f"✅ Comment Replied [{reply_type}] | ID: {comment_id[:15]}... | Latency: {latency:.0f}ms")
+            else:
+                logger.error(f"❌ Comment Reply Failed | ID: {comment_id[:15]}...")
+                
     except Exception as e:
         logger.error(f"❌ CRITICAL ERROR in handle_comment: {e}")
         save_failed_webhook(comment_data.get("id", "unknown"), comment_data, str(e))
@@ -124,11 +130,13 @@ def handle_dm(dm_data: dict):
     try:
         if is_bot_paused(): return
         if dm_data.get("message", {}).get("is_echo", False): return
+        
         sender_id = str(dm_data.get("sender", {}).get("id", ""))
         message_text = (dm_data.get("message", {}).get("text") or "").strip()
         message_id = dm_data.get("message", {}).get("mid", "")
         
         if not sender_id or not message_id: return
+        
         from config import SETTINGS
         if sender_id in (SETTINGS.own_account_id, SETTINGS.page_id): return
         if not claim_event(message_id): return
@@ -142,12 +150,13 @@ def handle_dm(dm_data: dict):
                     log_reply(message_id, sender_id, story_reply, source="story_mention")
                     save_dm_memory(sender_id, "bot", story_reply)
                 return
-
+                
         if not message_text: return
         if is_in_human_handoff(sender_id): return
-
+        
         save_dm_memory(sender_id, "user", message_text)
         use_ai = is_gemini_enabled() and not is_safe_mode()
+        
         reply = get_keyword_reply(message_text)
         reply_type = "keyword"
         
@@ -164,10 +173,12 @@ def handle_dm(dm_data: dict):
             reply = generate_dm_reply(message_text, sender_id)
             reply_type = "ai"
             
-        if reply is None: 
+        if reply is None:
             reply = random.choice(AESTHETIC_REPLIES)
             reply_type = "fallback"
-        
+            
+        # 🧠 Anti-Ban: DMs take slightly longer to type (4 to 10 seconds)
+        time.sleep(random.uniform(4.0, 10.0))
         if send_dm(sender_id, reply):
             log_reply(message_id, sender_id, reply, source="dm")
             save_dm_memory(sender_id, "bot", reply)
