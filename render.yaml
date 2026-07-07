@@ -1,18 +1,16 @@
 services:
-  - type: web
-    name: krishna-bot
-    env: python
-    plan: free
-    branch: main
-    autoDeploy: true
-    healthCheckPath: /
-    buildCommand: pip install -r requirements.txt
-    
-    # ✅ FIXED: Added --threads 4 to prevent Dashboard SSE from blocking webhooks
-    startCommand: gunicorn main:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 --keep-alive 5
-    
-    envVars:
-      - key: PYTHON_VERSION
-        value: "3.11.9"
-      - key: PYTHONUNBUFFERED
-        value: "1"
+- type: web
+  name: krishna-bot
+  env: python
+  plan: free
+  branch: main
+  autoDeploy: true
+  # ✅ FIXED: Changed from / to /health to save CPU/RAM
+  healthCheckPath: /health
+  buildCommand: pip install -r requirements.txt
+  startCommand: gunicorn main:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 --keep-alive 5
+  envVars:
+  - key: PYTHON_VERSION
+    value: "3.11.9"
+  - key: PYTHONUNBUFFERED
+    value: "1"
