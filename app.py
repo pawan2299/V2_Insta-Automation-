@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, Response
 import threading
 import json
 import time
@@ -23,15 +23,20 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# --- 🔒 Dashboard Security ---
+# --- 🔒 Dashboard Security (Browser Password Popup) ---
 def require_dashboard_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         auth = request.authorization
+        # Render Environment Variable se password lenge (Default: admin123)
         required_password = os.environ.get("DASHBOARD_PASSWORD", "admin123")
         
+        # Agar password galat hai ya nahi dala, toh Browser ka native popup trigger karein
         if not auth or auth.password != required_password:
-            return jsonify({"error": "Unauthorized"}), 401
+            return Response(
+                "Access Denied! Please enter the correct password.", 401,
+                {"WWW-Authenticate": 'Basic realm="Krishna Verse AI Dashboard"'}
+            )
         return f(*args, **kwargs)
     return decorated
 
