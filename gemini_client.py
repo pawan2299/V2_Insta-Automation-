@@ -65,6 +65,26 @@ def _clean_json_string(text: str) -> str:
     text = re.sub(r'\s*```$', '', text.strip())
     return text.strip()
 
+# ✅ FIX: Reply beech mein kat jaane wali bug ka safety-net.
+# Root cause thi ki thinking-models apna internal reasoning bhi max_output_tokens
+# budget mein se hi kaatte the, isliye asli reply adhoora reh jaata tha.
+# thinking_budget=0 (neeche _generate mein) usse pehle hi rok deta hai,
+# yeh function sirf ek extra safety-layer hai agar kabhi phir bhi cut ho jaaye.
+def _trim_incomplete_sentence(text: str) -> str:
+    """Agar reply beech mein kat gaya ho, toh aakhri adhoore vaakya ko hata dega."""
+    if not text:
+        return text
+    enders = ['.', '!', '?', '।', '😊', '🙏', '✨', '🌸', '😄', '💛', '👍', '🙈', '❤️', '🔥']
+    if text[-1] in enders:
+        return text
+    positions = [text.rfind(e) for e in enders if text.rfind(e) != -1]
+    if not positions:
+        return text  # kuch bhi na mile toh jaisa hai waisa hi rehne do
+    last_pos = max(positions)
+    if last_pos > 10:  # bahut chhota trim na ho jaaye
+        return text[:last_pos + 1].strip()
+    return text
+
 def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", image_url: str | None = None, response_schema: dict | None = None) -> str | None:
     if task_type in ["spam", "dm_filter", "intent", "summary"]:
         models_to_try = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
@@ -74,7 +94,7 @@ def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", im
         models_to_try = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
 
     contents = [prompt]
-    
+
     if image_url:
         # 🛡️ SSRF Protection: Block internal/private IPs
         if not is_safe_url(image_url):
@@ -90,7 +110,14 @@ def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", im
             except Exception as e:
                 logger.warning(f"⚠️ Image download skipped for {image_url}: {e}")
 
-    config_kwargs = {"max_output_tokens": max_length, "temperature": 0.9, "top_p": 0.95}
+    # ✅ FIX: max_output_tokens mein safety-buffer + thinking_budget=0
+    # (yehi asli fix hai "reply beech mein kat jaane" wali bug ka)
+    config_kwargs = {
+        "max_output_tokens": max(max_length, 300),
+        "temperature": 0.9,
+        "top_p": 0.95,
+        "thinking_config": types.ThinkingConfig(thinking_budget=0),
+    }
     if response_schema:
         config_kwargs["response_mime_type"] = "application/json"
         config_kwargs["response_schema"] = response_schema
@@ -143,15 +170,19 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
     context = f"\nPost Context: {post_caption[:150]}" if post_caption else ""
     recent = get_recent_replies(5)
     history_context = "\nRecent replies (DO NOT REPEAT THESE): " + " | ".join(recent) if recent else ""
-    
+
+    # ✅ FIX: Naya human-team-member persona + tone-matching + devotional-restraint rule
     prompt = (
-        "You are the admin of @krishna.verse.ai, an aesthetic page posting AI videos of Little Krishna. "
-        "You reply to comments like a real, friendly, cute human admin. "
+        "You are a real team member replying to comments on @krishna.verse.ai's Instagram page. "
+        "Reply exactly like a genuine human page-admin would - NOT a spiritual bot, NOT a customer-service bot.\n"
         "RULES:\n"
-        "- Keep replies VERY short (under 15 words).\n"
-        "- Be cute, warm, and conversational.\n"
-        "- NEVER use heavy devotional blessings.\n"
-        "- NEVER ask people to follow in every reply.\n"
+        "- React to the SPECIFIC thing the person said - never a generic templated reply.\n"
+        "- Vary your length naturally - sometimes 2-3 words, sometimes a full sentence, like real texting.\n"
+        "- Match the commenter's TONE: if they're casual/funny, be casual back. If they're polite or "
+        "professional (business, collab, formal Hindi/English), reply politely and professionally too - no jokes, no slang.\n"
+        "- Devotional words (Radhe Radhe, Hare Krishna etc.) ONLY if the comment itself is genuinely devotional/spiritual "
+        "in tone. Never force them into casual comments.\n"
+        "- NEVER ask people to follow.\n"
         "- Match the user's language (Hindi/English/Hinglish).\n"
         "- Do NOT use markdown formatting like **bold**.\n"
         "Output ONLY the exact reply text. No prefixes, no quotes.\n"
@@ -160,12 +191,13 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
     )
     result = _generate(prompt, max_length=150, task_type="comment", image_url=image_url)
     if not result: return None
-    
+
     text = result.strip()
     if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
         text = text[1:-1]
     text = text.replace("**", "").replace("*", "").replace('"', '').replace('\n', ' ').replace('\r', '').strip()
     while "  " in text: text = text.replace("  ", " ")
+    text = _trim_incomplete_sentence(text)  # ✅ FIX: safety-net agar phir bhi cut ho
     return text
 
 def generate_dm_reply(message_text: str, user_id: str) -> str | None:
@@ -174,15 +206,26 @@ def generate_dm_reply(message_text: str, user_id: str) -> str | None:
     history = get_dm_memory(user_id, 3)
     history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in history]) if history else ""
     summary_context = f"\n[Long-term Context Summary]: {summary}\n" if summary else ""
-    
+
+    # ✅ FIX: DM mein bhi wahi human-team-member persona + tone-matching + devotional-restraint
     prompt = (
-        "You manage Instagram DMs for @krishna.verse.ai. You are a friendly, aesthetic page admin. "
-        "NEVER sound like a chatbot. NEVER mention AI unless asked.\n"
+        "You are a real team member replying to Instagram DMs for @krishna.verse.ai. "
+        "Reply exactly like a genuine human would - NOT a spiritual bot, NOT a customer-service script.\n"
+        "RULES:\n"
+        "- React to the SPECIFIC thing the person said - never generic or templated.\n"
+        "- Match the sender's TONE: if they're casual/friendly, be casual back. If they're polite or "
+        "professional (business, collab, serious question), reply politely and professionally - no jokes, no slang.\n"
+        "- Devotional words (Radhe Radhe, Hare Krishna etc.) ONLY if the person's message is genuinely "
+        "devotional/spiritual in tone. Never force them.\n"
+        "- NEVER sound like a chatbot. NEVER mention AI unless directly asked.\n"
+        "- Vary length naturally like real texting - don't always write the same length.\n"
         f"{summary_context}"
         f"Recent Messages:\n{history_str}\n"
         f"Follower's new message: {message_text}\nYour reply:"
     )
-    return _generate(prompt, max_length=300, task_type="dm")
+    result = _generate(prompt, max_length=300, task_type="dm")
+    if not result: return None
+    return _trim_incomplete_sentence(result.strip())  # ✅ FIX: safety-net agar phir bhi cut ho
 
 def generate_welcome_dm(username: str) -> str | None:
     if not can_use_gemini(): return None
