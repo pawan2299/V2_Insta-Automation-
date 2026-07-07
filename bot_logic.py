@@ -19,12 +19,32 @@ from instagram_api import reply_to_comment, send_dm, get_media_details
 
 logger = logging.getLogger(__name__)
 
+# ✅ FIX: Pool ko 6 se badhakar 22 kiya - zyada variety, zyada human, kam repeat
+# Sirf kabhi-kabhar devotional (Radhe Radhe / Hare Krishna) - har jagah force nahi.
 AESTHETIC_REPLIES = [
-    "Thank you so much! 🌸✨", "Glad you liked it! 💛", "Radhe Radhe 🌸",
-    "So sweet of you! ✨", "Hare Krishna 🦚", "Thank you! 🥺💛",
+    "Thank you so much! 🌸✨", "Glad you liked it! 💛", "So sweet of you! ✨",
+    "Thank you! 🥺💛", "Haha shukriya! 😄", "Itna support hi humein aage badhata hai 🙏",
+    "Yeh sunke acha laga! 😊", "Thanks a lot! ❤️", "Glad it made your day! 🌟",
+    "Aww thank you! 🥹", "Sach mein khushi hui yeh padhke 💛", "Appreciate it! 😄",
+    "Radhe Radhe 🌸", "Hare Krishna ✨", "Nice to hear that! 😊",
+    "Thanks yaar! 🙌", "Bahut acha laga sunke 💫", "Sahi bola! 😄",
+    "Thank you so much for this! 🌸", "Glad you're enjoying it! ✨",
+    "Yeh comment dekh ke mood ban gaya 😄", "Shukriya itna pyaar dene ke liye 💛",
 ]
-EMOJI_REPLIES = ["🙏🏻✨", "Radhe Radhe 🌸", "Thank you! 🥺💛", "Hare Krishna ✨"]
+EMOJI_REPLIES = [
+    "🙏🏻✨", "Thank you! 🥺💛", "😄❤️", "🙈❤️", "😊🌸", "🔥🔥",
+    "Radhe Radhe 🌸", "Hare Krishna ✨", "😄👍", "💛💛",
+]
 ESCALATION_ACK_DM = "Hi there! 👋 I've passed your message to the admin. They'll get back to you soon! ✨"
+
+# ✅ FIX: Story-mention thank-you ke liye bhi ab ek chhota diverse pool -
+# pehle yeh hamesha ek hi hardcoded "Radhe Radhe" line thi jab AI fail hota tha.
+STORY_THANK_YOU_FALLBACKS = [
+    "🌸 Thanks so much for sharing on your story! ✨",
+    "Aww thank you for the shoutout! 💛",
+    "Shukriya itna support karne ke liye! 😊🙏",
+    "Thanks for sharing! Means a lot 🌸",
+]
 
 def _is_emoji_only(text: str) -> bool:
     clean = re.sub(r'[\s!.,?@#\-_]', '', text)
@@ -145,7 +165,7 @@ def handle_dm(dm_data: dict):
         for att in attachments:
             if att.get("type") == "story_mention":
                 logger.info(f"✅ Story Mention detected from {sender_id}")
-                story_reply = generate_story_thank_you() or "🌸 Radhe Radhe! Thanks for sharing our content on your story! ✨"
+                story_reply = generate_story_thank_you() or random.choice(STORY_THANK_YOU_FALLBACKS)
                 if send_dm(sender_id, story_reply):
                     log_reply(message_id, sender_id, story_reply, source="story_mention")
                     save_dm_memory(sender_id, "bot", story_reply)
