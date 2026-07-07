@@ -50,7 +50,7 @@
                 <canvas id="latencyChart"></canvas>
             </div>
             <div class="glass p-6">
-                <h3 class="text-gold font-semibold mb-4">AI Model Usage</h3>
+                <h3 class="text-gold font-semibold mb-4">AI Model Usage (Today)</h3>
                 <canvas id="modelChart"></canvas>
             </div>
         </div>
@@ -77,15 +77,29 @@
                 stats: { total_replies: 0, replies_24h: 0, status_text: 'Loading...', status_class: 'text-gray-400', bot_paused: false },
                 latencyChart: null,
                 modelChart: null,
+                
                 init() {
-                    fetch('/api/stats').then(r => r.json()).then(data => this.stats = data);
-                    
-                    // Initialize Charts
+                    // Fetch initial stats
+                    fetch('/api/stats')
+                        .then(r => r.json())
+                        .then(data => this.stats = data)
+                        .catch(err => console.error('Stats fetch failed:', err));
+
+                    // Initialize Latency Chart
                     this.latencyChart = new Chart(document.getElementById('latencyChart'), {
                         type: 'line',
-                        data: { labels: [], datasets: [{ label: 'Latency', data: [], borderColor: '#ff9933', tension: 0.4, fill: false }] },
-                        options: { responsive: true, scales: { y: { beginAtZero: true, grid: { color: '#2a2a35' }, ticks: { color: '#888' } }, x: { grid: { display: false }, ticks: { color: '#888' } } }, plugins: { legend: { labels: { color: '#e0e0e0' } } } }
+                        data: { labels: [], datasets: [{ label: 'Latency (ms)', data: [], borderColor: '#ff9933', tension: 0.4, fill: false }] },
+                        options: { 
+                            responsive: true, 
+                            scales: { 
+                                y: { beginAtZero: true, grid: { color: '#2a2a35' }, ticks: { color: '#888' } }, 
+                                x: { grid: { display: false }, ticks: { color: '#888' } } 
+                            }, 
+                            plugins: { legend: { labels: { color: '#e0e0e0' } } } 
+                        }
                     });
+
+                    // Initialize Model Usage Chart
                     this.modelChart = new Chart(document.getElementById('modelChart'), {
                         type: 'doughnut',
                         data: { labels: [], datasets: [{ data: [], backgroundColor: ['#ff9933', '#d4af37', '#4ade80', '#f87171'] }] },
@@ -95,23 +109,54 @@
                     // SSE for Live Updates
                     const evtSource = new EventSource("/stream");
                     evtSource.onmessage = (event) => {
-                        const data = JSON.parse(event.data);
-                        this.latencyChart.data.labels.push(new Date().toLocaleTimeString());
-                        this.latencyChart.data.datasets[0].data.push(data.latency);
-                        if (this.latencyChart.data.labels.length > 10) {
-                            this.latencyChart.data.labels.shift();
-                            this.latencyChart.data.datasets[0].data.shift();
+                        try {
+                            const data = JSON.parse(event.data);
+                            
+                            // Update Latency Chart
+                            this.latencyChart.data.labels.push(new Date().toLocaleTimeString());
+                            this.latencyChart.data.datasets[0].data.push(data.latency);
+                            if (this.latencyChart.data.labels.length > 10) {
+                                this.latencyChart.data.labels.shift();
+                                this.latencyChart.data.datasets[0].data.shift();
+                            }
+                            this.latencyChart.update();
+
+                            // Update Model Chart
+                            if(data.models && data.models.length > 0) {
+                                this.modelChart.data.labels = data.models.map(m => m.label);
+                                this.modelChart.data.datasets[0].data = data.models.map(m => m.used);
+                                this.modelChart.update();
+                            }
+                        } catch (e) {
+                            console.error('SSE Parse error:', e);
                         }
-                        this.latencyChart.update();
-                        
-                        this.modelChart.data.labels = data.models.map(m => m.label);
-                        this.modelChart.data.datasets[0].data = data.models.map(m => m.used);
-                        this.modelChart.update();
+                    };
+                    
+                    evtSource.onerror = () => {
+                        console.warn('SSE connection lost. Reconnecting...');
                     };
                 },
-                toggleBot() { fetch('/api/toggle-bot', { method: 'POST' }).then(() => location.reload()); },
-                panicMode() { if(confirm('Enable Panic Mode?')) fetch('/api/panic', { method: 'POST' }).then(() => location.reload()); },
-                retryFailed() { fetch('/retry-failed-webhooks', { method: 'POST' }).then(r => r.json()).then(d => alert(d.message)); }
+                
+                toggleBot() { 
+                    fetch('/api/toggle-bot', { method: 'POST' })
+                        .then(() => location.reload())
+                        .catch(err => alert('Failed to toggle bot'));
+                },
+                
+                panicMode() { 
+                    if(confirm('Enable Panic Mode? This will disable AI and switch to safe mode.')) {
+                        fetch('/api/panic', { method: 'POST' })
+                            .then(() => location.reload())
+                            .catch(err => alert('Failed to enable panic mode'));
+                    }
+                },
+                
+                retryFailed() { 
+                    fetch('/retry-failed-webhooks', { method: 'POST' })
+                        .then(r => r.json())
+                        .then(d => alert(d.message))
+                        .catch(err => alert('Failed to retry webhooks'));
+                }
             }
         }
     </script>
