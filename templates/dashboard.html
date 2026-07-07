@@ -1,164 +1,733 @@
 <!DOCTYPE html>
-<html lang="en" x-data="dashboard()">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Krishna Verse AI | Enterprise Dashboard</title>
+    <title>Krishna Verse AI | Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600&family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
     <style>
-        :root { --bg: #0a0a0c; --card: rgba(20, 20, 25, 0.6); --border: rgba(255, 255, 255, 0.05); --gold: #d4af37; --saffron: #ff9933; }
-        body { background: var(--bg); color: #e0e0e0; font-family: 'Inter', sans-serif; }
-        .glass { background: var(--card); backdrop-filter: blur(12px); border: 1px solid var(--border); border-radius: 1.5rem; }
-        .text-gold { color: var(--gold); }
-        .text-saffron { color: var(--saffron); }
-        .font-royal { font-family: 'Cinzel', serif; }
-        .glow { box-shadow: 0 0 20px rgba(255, 153, 51, 0.15); }
-        .stat-value { font-size: 2.5rem; font-weight: 600; background: linear-gradient(90deg, var(--saffron), var(--gold)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .bg-saffron\/20 { background-color: rgba(255, 153, 51, 0.2); }
-        .border-saffron\/50 { border-color: rgba(255, 153, 51, 0.5); }
-        .hover\:bg-saffron\/30:hover { background-color: rgba(255, 153, 51, 0.3); }
+        * { -webkit-font-smoothing: antialiased; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #fef9f3 0%, #fff7ed 100%);
+            color: #1f2937;
+            min-height: 100vh;
+        }
+        .font-display { font-family: 'Playfair Display', serif; }
+        
+        .glass-card {
+            background: rgba(255, 255, 255, 0.85);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 153, 51, 0.1);
+            border-radius: 1.25rem;
+            box-shadow: 0 4px 20px rgba(255, 153, 51, 0.05);
+            transition: all 0.3s ease;
+        }
+        .glass-card:hover {
+            box-shadow: 0 8px 30px rgba(255, 153, 51, 0.12);
+            transform: translateY(-2px);
+        }
+        
+        .gradient-text {
+            background: linear-gradient(135deg, #ff9933 0%, #d4af37 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .stat-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+        }
+        
+        .status-live {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+        }
+        .status-paused {
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+            color: white;
+        }
+        .status-warning {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            color: white;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #ff9933 0%, #f59e0b 100%);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.75rem;
+            font-weight: 600;
+            transition: all 0.2s;
+            border: none;
+            cursor: pointer;
+            box-shadow: 0 4px 14px rgba(255, 153, 51, 0.3);
+        }
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px rgba(255, 153, 51, 0.4);
+        }
+        .btn-primary:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .btn-danger {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.75rem;
+            font-weight: 600;
+            transition: all 0.2s;
+            border: none;
+            cursor: pointer;
+            box-shadow: 0 4px 14px rgba(239, 68, 68, 0.3);
+        }
+        .btn-danger:hover:not(:disabled) {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px rgba(239, 68, 68, 0.4);
+        }
+        .btn-danger:disabled { opacity: 0.6; cursor: not-allowed; }
+        
+        .btn-secondary {
+            background: white;
+            color: #ff9933;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.75rem;
+            font-weight: 600;
+            transition: all 0.2s;
+            border: 2px solid #ff9933;
+            cursor: pointer;
+        }
+        .btn-secondary:hover:not(:disabled) {
+            background: #ff9933;
+            color: white;
+        }
+        .btn-secondary:disabled { opacity: 0.6; cursor: not-allowed; }
+        
+        .progress-bar-bg {
+            background: #f3f4f6;
+            border-radius: 999px;
+            height: 8px;
+            overflow: hidden;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            border-radius: 999px;
+            transition: width 0.5s ease;
+        }
+        .progress-green { background: linear-gradient(90deg, #10b981, #059669); }
+        .progress-yellow { background: linear-gradient(90deg, #f59e0b, #d97706); }
+        .progress-red { background: linear-gradient(90deg, #ef4444, #dc2626); }
+        
+        .activity-item {
+            display: flex;
+            align-items: center;
+            padding: 0.75rem;
+            border-radius: 0.75rem;
+            transition: background 0.2s;
+        }
+        .activity-item:hover { background: rgba(255, 153, 51, 0.05); }
+        
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #10b981;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.3); }
+        }
+        
+        .loader {
+            border: 3px solid #f3f4f6;
+            border-top: 3px solid #ff9933;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .top-post-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.875rem;
+            border-radius: 0.75rem;
+            background: #fef9f3;
+            margin-bottom: 0.5rem;
+            transition: all 0.2s;
+        }
+        .top-post-item:hover {
+            background: #fff7ed;
+            transform: translateX(4px);
+        }
+        
+        .badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .badge-comment { background: #dbeafe; color: #1e40af; }
+        .badge-dm { background: #fce7f3; color: #9f1239; }
+        .badge-welcome { background: #dcfce7; color: #166534; }
+        .badge-story { background: #fef3c7; color: #92400e; }
     </style>
 </head>
-<body class="min-h-screen p-4 md:p-8">
-    <div class="max-w-7xl mx-auto">
-        <header class="text-center mb-12">
-            <h1 class="font-royal text-4xl md:text-5xl text-gold glow inline-block px-6 py-2 rounded-2xl">🦚 Krishna Verse AI</h1>
-            <p class="text-gray-400 mt-4">Enterprise Admin Dashboard</p>
+<body>
+    <div class="max-w-7xl mx-auto px-4 md:px-8 py-6">
+        <!-- Header -->
+        <header class="mb-8">
+            <div class="flex items-center justify-between flex-wrap gap-4">
+                <div>
+                    <h1 class="font-display text-4xl md:text-5xl font-bold gradient-text">🦚 Krishna Verse AI</h1>
+                    <p class="text-gray-500 mt-2">Enterprise Admin Dashboard</p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <div id="liveIndicator" class="flex items-center gap-2 px-4 py-2 bg-white rounded-full shadow-sm">
+                        <span class="pulse-dot"></span>
+                        <span id="lastUpdated" class="text-sm text-gray-600">Loading...</span>
+                    </div>
+                </div>
+            </div>
         </header>
 
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-            <div class="glass p-6 glow">
-                <p class="text-gray-400 text-sm">Total Replies</p>
-                <p class="stat-value" x-text="stats.total_replies">0</p>
-            </div>
-            <div class="glass p-6 glow">
-                <p class="text-gray-400 text-sm">Last 24h</p>
-                <p class="stat-value" x-text="stats.replies_24h">0</p>
-            </div>
-            <div class="glass p-6 glow">
-                <p class="text-gray-400 text-sm">System Status</p>
-                <p class="text-2xl font-bold mt-2" :class="stats.status_class" x-text="stats.status_text">Live</p>
+        <!-- Status Banner -->
+        <div id="statusBanner" class="glass-card p-4 mb-6 hidden">
+            <div class="flex items-center gap-3">
+                <div id="statusIcon" class="stat-icon status-live">●</div>
+                <div>
+                    <p id="statusText" class="font-semibold text-lg">System Live</p>
+                    <p id="statusSubtext" class="text-sm text-gray-500">All systems operational</p>
+                </div>
             </div>
         </div>
 
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-            <div class="glass p-6">
-                <h3 class="text-gold font-semibold mb-4">Webhook Latency (ms)</h3>
-                <canvas id="latencyChart"></canvas>
+        <!-- Stats Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5 mb-6">
+            <!-- Total Replies -->
+            <div class="glass-card p-5">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <p class="text-gray-500 text-sm font-medium">Total Replies</p>
+                        <p class="text-3xl font-bold mt-2 gradient-text" id="totalReplies">0</p>
+                        <p class="text-xs text-gray-400 mt-1">All time comments replied</p>
+                    </div>
+                    <div class="stat-icon" style="background: #fef3c7; color: #d97706;">💬</div>
+                </div>
             </div>
-            <div class="glass p-6">
-                <h3 class="text-gold font-semibold mb-4">AI Model Usage (Today)</h3>
-                <canvas id="modelChart"></canvas>
+
+            <!-- Last 24h -->
+            <div class="glass-card p-5">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <p class="text-gray-500 text-sm font-medium">Last 24 Hours</p>
+                        <p class="text-3xl font-bold mt-2 gradient-text" id="replies24h">0</p>
+                        <p class="text-xs text-gray-400 mt-1">Recent engagement</p>
+                    </div>
+                    <div class="stat-icon" style="background: #dbeafe; color: #1e40af;">📈</div>
+                </div>
+            </div>
+
+            <!-- DMs Sent -->
+            <div class="glass-card p-5">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <p class="text-gray-500 text-sm font-medium">DMs Sent</p>
+                        <p class="text-3xl font-bold mt-2 gradient-text" id="totalDms">0</p>
+                        <p class="text-xs text-gray-400 mt-1">Direct messages</p>
+                    </div>
+                    <div class="stat-icon" style="background: #fce7f3; color: #9f1239;">💌</div>
+                </div>
+            </div>
+
+            <!-- Gemini Calls -->
+            <div class="glass-card p-5">
+                <div class="flex items-start justify-between">
+                    <div>
+                        <p class="text-gray-500 text-sm font-medium">AI Calls Today</p>
+                        <p class="text-3xl font-bold mt-2 gradient-text" id="geminiCalls">0</p>
+                        <p class="text-xs text-gray-400 mt-1">Gemini API usage</p>
+                    </div>
+                    <div class="stat-icon" style="background: #dcfce7; color: #166534;">🤖</div>
+                </div>
             </div>
         </div>
 
-        <div class="glass p-6 mb-8">
-            <h3 class="text-gold font-semibold mb-4">Action Center</h3>
-            <div class="flex flex-wrap gap-4">
-                <button @click="toggleBot()" class="px-6 py-3 bg-saffron/20 text-saffron border border-saffron/50 rounded-xl hover:bg-saffron/30 transition">
-                    <span x-text="stats.bot_paused ? '▶️ Resume Bot' : '⏸ Pause Bot'"></span>
-                </button>
-                <button @click="panicMode()" class="px-6 py-3 bg-red-500/20 text-red-400 border border-red-500/50 rounded-xl hover:bg-red-500/30 transition">
-                    🚨 Panic Mode
-                </button>
-                <button @click="retryFailed()" class="px-6 py-3 bg-blue-500/20 text-blue-400 border border-blue-500/50 rounded-xl hover:bg-blue-500/30 transition">
-                    🔄 Retry Failed Webhooks
-                </button>
+        <!-- Charts Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-6">
+            <!-- Model Usage -->
+            <div class="glass-card p-6 lg:col-span-1">
+                <h3 class="font-semibold text-lg mb-4 flex items-center gap-2">
+                    <span>🎯</span> AI Model Usage
+                </h3>
+                <div style="height: 250px;">
+                    <canvas id="modelChart"></canvas>
+                </div>
+                <div id="modelList" class="mt-4 space-y-3"></div>
+            </div>
+
+            <!-- Activity Chart -->
+            <div class="glass-card p-6 lg:col-span-2">
+                <h3 class="font-semibold text-lg mb-4 flex items-center gap-2">
+                    <span>⚡</span> Recent Activity Timeline
+                </h3>
+                <div style="height: 320px;">
+                    <canvas id="activityChart"></canvas>
+                </div>
             </div>
         </div>
+
+        <!-- Bottom Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-6">
+            <!-- Activity Feed -->
+            <div class="glass-card p-6 lg:col-span-2">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="font-semibold text-lg flex items-center gap-2">
+                        <span>📜</span> Recent Activity Feed
+                    </h3>
+                    <button onclick="refreshData()" class="text-sm text-orange-500 hover:text-orange-600 font-medium">
+                        Refresh
+                    </button>
+                </div>
+                <div id="activityFeed" class="space-y-2 max-h-96 overflow-y-auto">
+                    <div class="text-center py-8 text-gray-400">
+                        <div class="loader mx-auto"></div>
+                        <p class="mt-2">Loading activity...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Top Posts & Controls -->
+            <div class="space-y-5">
+                <!-- Top Posts -->
+                <div class="glass-card p-6">
+                    <h3 class="font-semibold text-lg mb-4 flex items-center gap-2">
+                        <span>🔥</span> Top Performing Posts
+                    </h3>
+                    <div id="topPosts" class="space-y-2">
+                        <div class="text-center py-6 text-gray-400 text-sm">
+                            No data yet
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Center -->
+                <div class="glass-card p-6">
+                    <h3 class="font-semibold text-lg mb-4 flex items-center gap-2">
+                        <span>⚙️</span> Action Center
+                    </h3>
+                    <div class="space-y-3">
+                        <button id="toggleBtn" onclick="toggleBot()" class="btn-primary w-full">
+                            ⏸ Pause Bot
+                        </button>
+                        <button id="panicBtn" onclick="panicMode()" class="btn-danger w-full">
+                            🚨 Panic Mode
+                        </button>
+                        <button id="resumeBtn" onclick="resumeBot()" class="btn-secondary w-full hidden">
+                            ▶️ Resume All
+                        </button>
+                        <button onclick="retryFailed()" class="btn-secondary w-full">
+                            🔄 Retry Failed Webhooks
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="text-center text-sm text-gray-400 py-6">
+            <p>🦚 Krishna Verse AI · Radhe Radhe · Powered by Gemini AI</p>
+        </footer>
     </div>
 
     <script>
-        function dashboard() {
-            return {
-                stats: { total_replies: 0, replies_24h: 0, status_text: 'Loading...', status_class: 'text-gray-400', bot_paused: false },
-                latencyChart: null,
-                modelChart: null,
-                
-                init() {
-                    // Fetch initial stats
-                    fetch('/api/stats')
-                        .then(r => r.json())
-                        .then(data => this.stats = data)
-                        .catch(err => console.error('Stats fetch failed:', err));
+        // 📊 Global State
+        let state = {
+            stats: null,
+            models: [],
+            activity: [],
+            topPosts: [],
+            charts: {
+                model: null,
+                activity: null,
+            },
+            isPaused: false,
+            isLoading: false,
+        };
 
-                    // Initialize Latency Chart
-                    this.latencyChart = new Chart(document.getElementById('latencyChart'), {
-                        type: 'line',
-                        data: { labels: [], datasets: [{ label: 'Latency (ms)', data: [], borderColor: '#ff9933', tension: 0.4, fill: false }] },
-                        options: { 
-                            responsive: true, 
-                            scales: { 
-                                y: { beginAtZero: true, grid: { color: '#2a2a35' }, ticks: { color: '#888' } }, 
-                                x: { grid: { display: false }, ticks: { color: '#888' } } 
-                            }, 
-                            plugins: { legend: { labels: { color: '#e0e0e0' } } } 
-                        }
-                    });
-
-                    // Initialize Model Usage Chart
-                    this.modelChart = new Chart(document.getElementById('modelChart'), {
-                        type: 'doughnut',
-                        data: { labels: [], datasets: [{ data: [], backgroundColor: ['#ff9933', '#d4af37', '#4ade80', '#f87171'] }] },
-                        options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { color: '#e0e0e0' } } } }
-                    });
-
-                    // SSE for Live Updates
-                    const evtSource = new EventSource("/stream");
-                    evtSource.onmessage = (event) => {
-                        try {
-                            const data = JSON.parse(event.data);
-                            
-                            // Update Latency Chart
-                            this.latencyChart.data.labels.push(new Date().toLocaleTimeString());
-                            this.latencyChart.data.datasets[0].data.push(data.latency);
-                            if (this.latencyChart.data.labels.length > 10) {
-                                this.latencyChart.data.labels.shift();
-                                this.latencyChart.data.datasets[0].data.shift();
-                            }
-                            this.latencyChart.update();
-
-                            // Update Model Chart
-                            if(data.models && data.models.length > 0) {
-                                this.modelChart.data.labels = data.models.map(m => m.label);
-                                this.modelChart.data.datasets[0].data = data.models.map(m => m.used);
-                                this.modelChart.update();
-                            }
-                        } catch (e) {
-                            console.error('SSE Parse error:', e);
-                        }
-                    };
-                    
-                    evtSource.onerror = () => {
-                        console.warn('SSE connection lost. Reconnecting...');
-                    };
+        // 🎨 Initialize Charts
+        function initCharts() {
+            // Model Usage Doughnut
+            const modelCtx = document.getElementById('modelChart').getContext('2d');
+            state.charts.model = new Chart(modelCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        data: [],
+                        backgroundColor: [
+                            '#ff9933',
+                            '#d4af37',
+                            '#10b981',
+                            '#3b82f6',
+                        ],
+                        borderWidth: 0,
+                    }]
                 },
-                
-                toggleBot() { 
-                    fetch('/api/toggle-bot', { method: 'POST' })
-                        .then(() => location.reload())
-                        .catch(err => alert('Failed to toggle bot'));
-                },
-                
-                panicMode() { 
-                    if(confirm('Enable Panic Mode? This will disable AI and switch to safe mode.')) {
-                        fetch('/api/panic', { method: 'POST' })
-                            .then(() => location.reload())
-                            .catch(err => alert('Failed to enable panic mode'));
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: '70%',
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: (ctx) => `${ctx.label}: ${ctx.parsed} calls`
+                            }
+                        }
                     }
-                },
-                
-                retryFailed() { 
-                    fetch('/retry-failed-webhooks', { method: 'POST' })
-                        .then(r => r.json())
-                        .then(d => alert(d.message))
-                        .catch(err => alert('Failed to retry webhooks'));
                 }
+            });
+
+            // Activity Bar Chart
+            const activityCtx = document.getElementById('activityChart').getContext('2d');
+            state.charts.activity = new Chart(activityCtx, {
+                type: 'bar',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Activity Count',
+                        data: [],
+                        backgroundColor: 'rgba(255, 153, 51, 0.7)',
+                        borderRadius: 8,
+                        borderSkipped: false,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            grid: { color: 'rgba(0,0,0,0.05)' },
+                            ticks: { color: '#6b7280', font: { size: 11 } },
+                            ticks: { stepSize: 1 }
+                        },
+                        x: {
+                            grid: { display: false },
+                            ticks: { color: '#6b7280', font: { size: 11 } }
+                        }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: 'rgba(255,255,255,0.95)',
+                            titleColor: '#1f2937',
+                            bodyColor: '#4b5563',
+                            borderColor: '#ff9933',
+                            borderWidth: 1,
+                        }
+                    }
+                }
+            });
+        }
+
+        // 🔄 Fetch Data from API
+        async function fetchData() {
+            try {
+                const response = await fetch('/api/stats');
+                if (response.status === 401) {
+                    document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-size:1.25rem;color:#ef4444;">🔒 Unauthorized - Please refresh and enter password</div>';
+                    return;
+                }
+                const data = await response.json();
+                if (data.success) {
+                    state.stats = data.stats;
+                    state.models = data.models || [];
+                    state.activity = data.recent_activity || [];
+                    state.topPosts = data.top_posts || [];
+                    state.status = data.status;
+                    updateUI();
+                }
+            } catch (err) {
+                console.error('Fetch failed:', err);
+                document.getElementById('lastUpdated').textContent = 'Connection error';
             }
         }
+
+        // 🎨 Update UI with fetched data
+        function updateUI() {
+            // Update timestamp
+            document.getElementById('lastUpdated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+
+            // Update Stats
+            if (state.stats) {
+                document.getElementById('totalReplies').textContent = state.stats.total_replies.toLocaleString();
+                document.getElementById('replies24h').textContent = state.stats.replies_24h.toLocaleString();
+                document.getElementById('totalDms').textContent = state.stats.total_dms.toLocaleString();
+                document.getElementById('geminiCalls').textContent = state.stats.total_gemini_today.toLocaleString();
+
+                // Status Banner
+                const banner = document.getElementById('statusBanner');
+                banner.classList.remove('hidden');
+                const statusIcon = document.getElementById('statusIcon');
+                statusIcon.className = `stat-icon ${state.status.class}`;
+                statusIcon.textContent = state.status.icon;
+                
+                const statusText = document.getElementById('statusText');
+                const statusSubtext = document.getElementById('statusSubtext');
+                statusText.textContent = `System ${state.status.text}`;
+                
+                state.isPaused = state.stats.bot_paused;
+                const toggleBtn = document.getElementById('toggleBtn');
+                const resumeBtn = document.getElementById('resumeBtn');
+                
+                if (state.stats.bot_paused) {
+                    statusSubtext.textContent = 'Bot operations are paused';
+                    toggleBtn.innerHTML = '▶️ Resume Bot';
+                    resumeBtn.classList.remove('hidden');
+                } else if (state.stats.safe_mode) {
+                    statusSubtext.textContent = 'Safe mode enabled - AI disabled';
+                    toggleBtn.innerHTML = '⏸ Pause Bot';
+                    resumeBtn.classList.remove('hidden');
+                } else if (state.stats.circuit_breaker) {
+                    statusSubtext.textContent = 'Circuit breaker active - AI cooling down';
+                    toggleBtn.innerHTML = '⏸ Pause Bot';
+                    resumeBtn.classList.remove('hidden');
+                } else {
+                    statusSubtext.textContent = 'All systems operational';
+                    toggleBtn.innerHTML = '⏸ Pause Bot';
+                    resumeBtn.classList.add('hidden');
+                }
+            }
+
+            // Update Model Chart
+            if (state.models.length > 0) {
+                state.charts.model.data.labels = state.models.map(m => m.label);
+                state.charts.model.data.datasets[0].data = state.models.map(m => m.used);
+                state.charts.model.update();
+
+                // Model List
+                const listHtml = state.models.map(m => {
+                    const pct = Math.min(100, m.percentage);
+                    const colorClass = pct < 50 ? 'progress-green' : (pct < 80 ? 'progress-yellow' : 'progress-red');
+                    const pctColor = pct < 50 ? 'text-green-600' : (pct < 80 ? 'text-yellow-600' : 'text-red-600');
+                    return `
+                        <div>
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="text-sm font-medium text-gray-700">${m.label}</span>
+                                <span class="text-sm font-semibold ${pctColor}">${m.used}/${m.limit}</span>
+                            </div>
+                            <div class="progress-bar-bg">
+                                <div class="progress-bar-fill ${colorClass}" style="width: ${pct}%"></div>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+                document.getElementById('modelList').innerHTML = listHtml;
+            }
+
+            // Update Activity Chart (group by minute)
+            if (state.activity.length > 0) {
+                const grouped = {};
+                const now = new Date();
+                
+                // Initialize last 10 minutes
+                for (let i = 9; i >= 0; i--) {
+                    const t = new Date(now.getTime() - i * 60000);
+                    const key = t.toTimeString().slice(0, 5);
+                    grouped[key] = 0;
+                }
+                
+                // Count activities in each minute
+                state.activity.forEach(a => {
+                    const timeKey = a.time.slice(0, 5);
+                    if (grouped[timeKey] !== undefined) {
+                        grouped[timeKey]++;
+                    }
+                });
+                
+                state.charts.activity.data.labels = Object.keys(grouped);
+                state.charts.activity.data.datasets[0].data = Object.values(grouped);
+                state.charts.activity.update();
+            }
+
+            // Update Activity Feed
+            const feed = document.getElementById('activityFeed');
+            if (state.activity.length === 0) {
+                feed.innerHTML = '<div class="text-center py-8 text-gray-400">No recent activity</div>';
+            } else {
+                const badgeClass = (action) => {
+                    if (action === 'comment') return 'badge-comment';
+                    if (action === 'dm' || action === 'dm_ack') return 'badge-dm';
+                    if (action.includes('Welcome') || action.includes('welcome')) return 'badge-welcome';
+                    if (action === 'story_mention') return 'badge-story';
+                    return 'badge-comment';
+                };
+                
+                feed.innerHTML = state.activity.map(a => `
+                    <div class="activity-item">
+                        <span class="badge ${badgeClass(a.action)} mr-3">${a.action}</span>
+                        <span class="text-sm text-gray-600 flex-1">${a.action} processed</span>
+                        <span class="text-xs text-gray-400">${a.time}</span>
+                    </div>
+                `).join('');
+            }
+
+            // Update Top Posts
+            const topPostsDiv = document.getElementById('topPosts');
+            if (state.topPosts.length === 0) {
+                topPostsDiv.innerHTML = '<div class="text-center py-6 text-gray-400 text-sm">No posts with replies yet</div>';
+            } else {
+                topPostsDiv.innerHTML = state.topPosts.map((post, idx) => `
+                    <div class="top-post-item">
+                        <div class="flex items-center gap-3">
+                            <span class="text-2xl">${idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '🏅'}</span>
+                            <div>
+                                <p class="font-medium text-sm text-gray-800">Post ${post.media_id.slice(-6)}</p>
+                                <p class="text-xs text-gray-500">${post.reply_count} ${post.reply_count === 1 ? 'reply' : 'replies'}</p>
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+            }
+        }
+
+        // 🎯 Action Functions
+        async function toggleBot() {
+            const btn = document.getElementById('toggleBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="loader mx-auto"></div>';
+            
+            try {
+                const res = await fetch('/api/toggle-bot', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    await fetchData();
+                    showToast(data.paused ? '⏸ Bot paused' : '▶️ Bot resumed');
+                }
+            } catch (err) {
+                showToast('❌ Action failed', true);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function panicMode() {
+            if (!confirm('Enable Panic Mode? This will disable AI and switch to safe mode.')) return;
+            
+            const btn = document.getElementById('panicBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="loader mx-auto"></div>';
+            
+            try {
+                const res = await fetch('/api/panic', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    await fetchData();
+                    showToast('🚨 Panic mode enabled');
+                }
+            } catch (err) {
+                showToast('❌ Action failed', true);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function resumeBot() {
+            const btn = document.getElementById('resumeBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="loader mx-auto"></div>';
+            
+            try {
+                const res = await fetch('/api/resume', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    await fetchData();
+                    showToast('▶️ All systems resumed');
+                }
+            } catch (err) {
+                showToast('❌ Action failed', true);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function retryFailed() {
+            if (!confirm('Retry failed webhooks?')) return;
+            
+            try {
+                const res = await fetch('/api/retry-failed', { method: 'POST' });
+                const data = await res.json();
+                showToast(data.message || 'Retrying...');
+            } catch (err) {
+                showToast('❌ Retry failed', true);
+            }
+        }
+
+        function refreshData() {
+            fetchData();
+            showToast('🔄 Refreshing data...');
+        }
+
+        // 🍞 Toast Notification
+        function showToast(message, isError = false) {
+            const toast = document.createElement('div');
+            toast.style.cssText = `
+                position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+                padding: 1rem 1.5rem; border-radius: 0.75rem;
+                background: ${isError ? 'linear-gradient(135deg, #ef4444, #dc2626)' : 'linear-gradient(135deg, #10b981, #059669)'};
+                color: white; font-weight: 600;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+                animation: slideIn 0.3s ease;
+            `;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            
+            setTimeout(() => {
+                toast.style.animation = 'slideOut 0.3s ease';
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        // 🚀 Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            initCharts();
+            fetchData();
+            // Auto-refresh every 5 seconds
+            setInterval(fetchData, 5000);
+        });
+
+        // Toast animations
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes slideIn {
+                from { transform: translateX(400px); opacity: 0; }
+                to { transform: translateX(0); opacity: 1; }
+            }
+            @keyframes slideOut {
+                from { transform: translateX(0); opacity: 1; }
+                to { transform: translateX(400px); opacity: 0; }
+            }
+        `;
+        document.head.appendChild(style);
     </script>
 </body>
 </html>
