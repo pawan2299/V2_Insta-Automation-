@@ -12,6 +12,7 @@ from psycopg2.extras import RealDictCursor
 from config import SETTINGS
 
 logger = logging.getLogger(__name__)
+
 _pool: pool.ThreadedConnectionPool | None = None
 _pool_lock = threading.Lock()
 
@@ -42,6 +43,7 @@ def get_db():
         if _pool is None or getattr(_pool, 'closed', False):
             logger.warning("DB pool closed. Reinitializing...")
             init_pool(force=True)
+        
         conn = _pool.getconn()
         try:
             with conn.cursor() as test_cur: test_cur.execute("SELECT 1")
@@ -52,6 +54,7 @@ def get_db():
             conn = None
             init_pool(force=True)
             conn = _pool.getconn()
+
         with conn.cursor() as cur: yield cur
         conn.commit()
     except Exception:
@@ -82,6 +85,7 @@ def init_db():
         cur.execute("""CREATE TABLE IF NOT EXISTS reply_feedback (id SERIAL PRIMARY KEY, reply_log_id INTEGER UNIQUE REFERENCES reply_logs(id) ON DELETE CASCADE, feedback TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW())""")
         
         cur.execute("""INSERT INTO system_config (key, value) VALUES ('bot_paused', 'false'), ('gemini_enabled', 'true'), ('safe_mode', 'false'), ('consecutive_429s', '0'), ('circuit_breaker_until', '0'), ('c2dm_enabled', 'true') ON CONFLICT DO NOTHING""")
+        
         cur.execute("CREATE INDEX IF NOT EXISTS idx_reply_logs_created ON reply_logs(created_at DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_reply_logs_media ON reply_logs(media_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_conv_mem_user ON conversation_memory(user_id, created_at DESC)")
@@ -101,33 +105,19 @@ def save_failed_webhook(event_id: str, payload: dict, error_msg: str):
     with get_db() as cur:
         cur.execute("""INSERT INTO failed_webhooks (event_id, payload, error_msg) VALUES (%s, %s, %s) ON CONFLICT (event_id) DO UPDATE SET error_msg = EXCLUDED.error_msg, retry_count = failed_webhooks.retry_count + 1""", (event_id, json.dumps(payload), error_msg))
 
-def get_and_lock_failed_webhooks(limit=10):
-    """Get failed webhooks that are old enough to retry (avoid racing with initial processing)."""
-    with get_db() as cur:
-        cur.execute("""
-            SELECT event_id, payload, error_msg, retry_count, created_at
-            FROM failed_webhooks
-            WHERE retry_count < 5
-              AND created_at < NOW() - INTERVAL '5 minutes'
-            ORDER BY created_at ASC
-            LIMIT %s
-        """, (limit,))
-        return cur.fetchall()
-
 def get_failed_webhooks(limit=10):
     with get_db() as cur:
         cur.execute("SELECT * FROM failed_webhooks ORDER BY created_at ASC LIMIT %s", (limit,))
         return cur.fetchall()
 
-# ✅ NEW: Auto-Retry Locking Function (Prevents duplicate retries in background)
 def get_and_lock_failed_webhooks(limit=5):
     with get_db() as cur:
         cur.execute("""
-            UPDATE failed_webhooks SET retry_count = retry_count + 1
-            WHERE event_id IN (
-                SELECT event_id FROM failed_webhooks WHERE retry_count < 5
-                ORDER BY created_at ASC LIMIT %s FOR UPDATE SKIP LOCKED
-            ) RETURNING *
+        UPDATE failed_webhooks SET retry_count = retry_count + 1
+        WHERE event_id IN (
+            SELECT event_id FROM failed_webhooks WHERE retry_count < 5
+            ORDER BY created_at ASC LIMIT %s FOR UPDATE SKIP LOCKED
+        ) RETURNING *
         """, (limit,))
         return cur.fetchall()
 
@@ -148,22 +138,6 @@ def get_conversation_summary(user_id: str) -> str:
 def trim_old_memories(user_id: str, keep_last: int = 3):
     with get_db() as cur:
         cur.execute("""DELETE FROM conversation_memory WHERE user_id = %s AND id NOT IN (SELECT id FROM conversation_memory WHERE user_id = %s ORDER BY created_at DESC LIMIT %s)""", (user_id, user_id, keep_last))
-
-def start_db_keepalive():
-    def ping():
-        while True:
-            time.sleep(60)
-            try:
-                global _pool
-                if _pool:
-                    conn = _pool.getconn()
-                    try:
-                        with conn.cursor() as cur: cur.execute("SELECT 1")
-                        conn.commit()
-                    finally: _pool.putconn(conn)
-            except Exception as e:
-                logger.debug(f"DB keepalive ping skipped or failed: {e}")
-    threading.Thread(target=ping, daemon=True).start()
 
 def get_config(key: str) -> str:
     with get_db() as cur:
@@ -218,10 +192,10 @@ def claim_welcome_dm(user_id: str) -> bool:
 def claim_c2dm_dm(user_id: str, keyword: str, cooldown_hours: int = 24) -> bool:
     with get_db() as cur:
         cur.execute("""
-            INSERT INTO c2dm_cooldowns (user_id, keyword, sent_at) VALUES (%s, %s, NOW())
-            ON CONFLICT (user_id, keyword) DO UPDATE
-            SET sent_at = EXCLUDED.sent_at
-            WHERE c2dm_cooldowns.sent_at < NOW() - make_interval(hours => %s)
+        INSERT INTO c2dm_cooldowns (user_id, keyword, sent_at) VALUES (%s, %s, NOW())
+        ON CONFLICT (user_id, keyword) DO UPDATE
+        SET sent_at = EXCLUDED.sent_at
+        WHERE c2dm_cooldowns.sent_at < NOW() - make_interval(hours => %s)
         """, (user_id, keyword, cooldown_hours))
         return cur.rowcount == 1
 
@@ -262,21 +236,21 @@ def get_stats() -> dict:
         today_replied = cur.fetchone()["c"]
         cur.execute("SELECT COUNT(*) as c FROM reply_logs WHERE source IN ('dm', 'dm_ack', 'story_mention')")
         total_dms = cur.fetchone()["c"]
-        return {
-            "total_comments_replied": total_replied, "last_24h_replies": today_replied,
-            "welcome_dms_sent": total_dms, "bot_paused": is_bot_paused(),
-            "gemini_enabled": is_gemini_enabled(), "safe_mode": is_safe_mode(),
-            "consecutive_429s": int(get_config("consecutive_429s") or 0),
-            "circuit_breaker_active": is_circuit_breaker_active()
-        }
+    return {
+        "total_comments_replied": total_replied, "last_24h_replies": today_replied,
+        "welcome_dms_sent": total_dms, "bot_paused": is_bot_paused(),
+        "gemini_enabled": is_gemini_enabled(), "safe_mode": is_safe_mode(),
+        "consecutive_429s": int(get_config("consecutive_429s") or 0),
+        "circuit_breaker_active": is_circuit_breaker_active()
+    }
 
 def get_recent_activity(limit: int = 10) -> list:
     with get_db() as cur:
         cur.execute("""
-            (SELECT source AS action, created_at FROM reply_logs ORDER BY created_at DESC LIMIT 50) 
-            UNION ALL 
-            (SELECT 'Welcome DM' AS action, sent_at AS created_at FROM dm_cooldowns ORDER BY sent_at DESC LIMIT 10) 
-            ORDER BY created_at DESC LIMIT %s
+        (SELECT source AS action, created_at FROM reply_logs ORDER BY created_at DESC LIMIT 50)
+        UNION ALL
+        (SELECT 'Welcome DM' AS action, sent_at AS created_at FROM dm_cooldowns ORDER BY sent_at DESC LIMIT 10)
+        ORDER BY created_at DESC LIMIT %s
         """, (limit,))
         return cur.fetchall()
 
@@ -345,35 +319,37 @@ def find_c2dm_trigger(text: str) -> dict | None:
     return None
 
 def set_telegram_state(chat_id: str, state_data: dict): set_config(f"tg_state_{chat_id}", json.dumps(state_data))
+
 def get_telegram_state(chat_id: str) -> dict | None:
     raw = get_config(f"tg_state_{chat_id}")
     if raw:
         try: return json.loads(raw)
         except Exception: pass
     return None
+
 def clear_telegram_state(chat_id: str): set_config(f"tg_state_{chat_id}", "")
 
 def get_recent_ai_replies(limit: int = 5) -> list:
     with get_db() as cur:
         cur.execute("""
-            SELECT id, event_id, user_id, reply_text, media_id, created_at 
-            FROM reply_logs 
-            WHERE source = 'comment' 
-              AND reply_text NOT LIKE 'Thank you%%' 
-              AND reply_text NOT LIKE 'Radhe Radhe%%'
-              AND reply_text NOT LIKE '🙏%%'
-              AND reply_text NOT LIKE '[Filtered Spam]'
-              AND reply_text NOT LIKE 'Glad you liked it%%'
-            ORDER BY created_at DESC LIMIT %s
+        SELECT id, event_id, user_id, reply_text, media_id, created_at
+        FROM reply_logs
+        WHERE source = 'comment'
+        AND reply_text NOT LIKE 'Thank you%%'
+        AND reply_text NOT LIKE 'Radhe Radhe%%'
+        AND reply_text NOT LIKE '🙏%%'
+        AND reply_text NOT LIKE '[Filtered Spam]'
+        AND reply_text NOT LIKE 'Glad you liked it%%'
+        ORDER BY created_at DESC LIMIT %s
         """, (limit,))
         return cur.fetchall()
 
 def save_reply_feedback(reply_log_id: int, feedback: str):
     with get_db() as cur:
         cur.execute("""
-            INSERT INTO reply_feedback (reply_log_id, feedback) 
-            VALUES (%s, %s) 
-            ON CONFLICT (reply_log_id) DO UPDATE SET feedback = EXCLUDED.feedback
+        INSERT INTO reply_feedback (reply_log_id, feedback)
+        VALUES (%s, %s)
+        ON CONFLICT (reply_log_id) DO UPDATE SET feedback = EXCLUDED.feedback
         """, (reply_log_id, feedback))
 
 def update_reply_text(reply_log_id: int, new_text: str):
@@ -383,9 +359,9 @@ def update_reply_text(reply_log_id: int, new_text: str):
 def get_top_posts(limit: int = 5) -> list:
     with get_db() as cur:
         cur.execute("""
-            SELECT media_id, COUNT(*) as reply_count 
-            FROM reply_logs 
-            WHERE media_id IS NOT NULL AND media_id != '' AND source = 'comment'
-            GROUP BY media_id ORDER BY reply_count DESC LIMIT %s
+        SELECT media_id, COUNT(*) as reply_count
+        FROM reply_logs
+        WHERE media_id IS NOT NULL AND media_id != '' AND source = 'comment'
+        GROUP BY media_id ORDER BY reply_count DESC LIMIT %s
         """, (limit,))
         return cur.fetchall()
