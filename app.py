@@ -1,11 +1,9 @@
 from flask import Flask, request, jsonify, render_template, Response
 import threading
-import queue
 import json
 import time
 import logging
 import os
-import hmac
 from functools import wraps
 from datetime import datetime, timezone, timedelta
 
@@ -25,42 +23,16 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# 📦 Task Queue for Render Free Tier Safety (OOM Protection)
-task_queue = queue.Queue(maxsize=1000)
-
-def bg_worker():
-    """Permanent worker thread to process tasks sequentially without causing memory leaks"""
-    while True:
-        task = task_queue.get()
-        if task is None:
-            break
-        try:
-            task_type = task.get("type")
-            payload = task.get("payload")
-            
-            if task_type == "meta_comment":
-                handle_comment(payload)
-            elif task_type == "meta_dm":
-                handle_dm(payload)
-            elif task_type == "telegram":
-                handle_update(payload)
-        except Exception as e:
-            logger.error(f"❌ Worker Execution Error: {e}")
-        finally:
-            task_queue.task_done()
-
-# Start 4 permanent daemon worker threads
-for _ in range(4):
-    threading.Thread(target=bg_worker, daemon=True).start()
-
-# 🔒 Dashboard Security (Timing Attack Protected)
+# --- 🔒 Dashboard Security (Browser Password Popup) ---
 def require_dashboard_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         auth = request.authorization
+        # Render Environment Variable se password lenge (Default: admin123)
         required_password = os.environ.get("DASHBOARD_PASSWORD", "admin123")
         
-        if not auth or not auth.password or not hmac.compare_digest(auth.password, required_password):
+        # Agar password galat hai ya nahi dala, toh Browser ka native popup trigger karein
+        if not auth or auth.password != required_password:
             return Response(
                 "Access Denied! Please enter the correct password.", 401,
                 {"WWW-Authenticate": 'Basic realm="Krishna Verse AI Dashboard"'}
@@ -75,7 +47,7 @@ def initialize_app():
             init_db()
             register_telegram_webhook()
             app._db_initialized = True
-            logger.info("🚀 Database and Telegram Webhook initialized securely.")
+            logger.info("🚀 Database and Telegram Webhook initialized.")
         except Exception as e:
             logger.error(f"❌ Initialization failed: {e}")
 
@@ -107,26 +79,26 @@ def instagram_webhook():
     if not data or "entry" not in data:
         return "OK", 200
 
+    threading.Thread(target=_process_meta_payload, args=(data,), daemon=True).start()
+    return "OK", 200
+
+def _process_meta_payload(data):
     try:
         for entry in data.get("entry", []):
             for change in entry.get("changes", []):
-                if change.get("field") == "comments":
-                    task_queue.put_nowait({"type": "meta_comment", "payload": change.get("value", {})})
+                field = change.get("field")
+                value = change.get("value", {})
+                if field == "comments": handle_comment(value)
             for messaging in entry.get("messaging", []):
-                task_queue.put_nowait({"type": "meta_dm", "payload": messaging})
-    except queue.Full:
-        logger.warning("⚠️ Task queue full! Dropping Meta webhook payload.")
-
-    return "OK", 200
+                handle_dm(messaging)
+    except Exception as e:
+        logger.error(f"❌ Error processing Meta payload: {e}")
 
 @app.route("/telegram-webhook", methods=["POST"])
 def telegram_webhook():
     update = request.get_json(silent=True)
     if update:
-        try:
-            task_queue.put_nowait({"type": "telegram", "payload": update})
-        except queue.Full:
-            logger.warning("⚠️ Task queue full! Dropping Telegram update.")
+        threading.Thread(target=handle_update, args=(update,), daemon=True).start()
     return "OK", 200
 
 # --- 📊 Enhanced Dashboard API ---
@@ -136,6 +108,7 @@ def api_stats():
     try:
         stats = get_stats()
         
+        # 🎯 Gemini Model Usage - Real Data
         total_pool = len(gemini_client._clients) if gemini_client._clients else 1
         models_usage = []
         total_calls_today = 0
@@ -154,6 +127,7 @@ def api_stats():
             })
             total_calls_today += used
         
+        # 📜 Recent Activity Feed
         recent_activity = []
         try:
             activities = get_recent_activity(8)
@@ -166,6 +140,7 @@ def api_stats():
         except Exception as e:
             logger.warning(f"Recent activity fetch failed: {e}")
         
+        # 🔥 Top Performing Posts
         top_posts = []
         try:
             posts = get_top_posts(5)
@@ -177,6 +152,7 @@ def api_stats():
         except Exception as e:
             logger.warning(f"Top posts fetch failed: {e}")
         
+        # System Status Logic
         bot_paused = stats.get("bot_paused", False)
         safe_mode = stats.get("safe_mode", False)
         circuit_breaker = stats.get("circuit_breaker_active", False)
@@ -256,16 +232,21 @@ def retry_failed():
     if not failed:
         return jsonify({"success": True, "message": "No failed webhooks to retry.", "count": 0})
     
-    for record in failed:
+    threading.Thread(target=_retry_webhooks, args=(failed,), daemon=True).start()
+    return jsonify({"success": True, "message": f"Retrying {len(failed)} webhooks in background.", "count": len(failed)})
+
+def _retry_webhooks(failed_records):
+    from database import delete_failed_webhook
+    for record in failed_records:
         try:
-            task_queue.put_nowait({
-                "type": "meta_dm" if "message" in record.get("payload", {}) else "meta_comment", 
-                "payload": record.get("payload")
-            })
-        except:
-            pass
-            
-    return jsonify({"success": True, "message": f"Retrying {len(failed)} webhooks via queue.", "count": len(failed)})
+            payload = record.get("payload")
+            if "message" in payload and "mid" in payload.get("message", {}):
+                handle_dm(payload)
+            elif "id" in payload and "text" in payload:
+                handle_comment(payload)
+            delete_failed_webhook(record["event_id"])
+        except Exception as e:
+            logger.error(f"Retry failed for {record['event_id']}: {e}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=SETTINGS.port, debug=False)
