@@ -19,8 +19,6 @@ from instagram_api import reply_to_comment, send_dm, get_media_details
 
 logger = logging.getLogger(__name__)
 
-# ✅ FIX: Pool ko 6 se badhakar 22 kiya - zyada variety, zyada human, kam repeat
-# Sirf kabhi-kabhar devotional (Radhe Radhe / Hare Krishna) - har jagah force nahi.
 AESTHETIC_REPLIES = [
     "Thank you so much! 🌸✨", "Glad you liked it! 💛", "So sweet of you! ✨",
     "Thank you! 🥺💛", "Haha shukriya! 😄", "Itna support hi humein aage badhata hai 🙏",
@@ -37,8 +35,6 @@ EMOJI_REPLIES = [
 ]
 ESCALATION_ACK_DM = "Hi there! 👋 I've passed your message to the admin. They'll get back to you soon! ✨"
 
-# ✅ FIX: Story-mention thank-you ke liye bhi ab ek chhota diverse pool -
-# pehle yeh hamesha ek hi hardcoded "Radhe Radhe" line thi jab AI fail hota tha.
 STORY_THANK_YOU_FALLBACKS = [
     "🌸 Thanks so much for sharing on your story! ✨",
     "Aww thank you for the shoutout! 💛",
@@ -91,7 +87,6 @@ def handle_comment(comment_data: dict):
         reply = None
         reply_type = "unknown"
         
-        # ✅ FIX: Keyword priority (Highest priority, before emoji/spam/AI checks)
         reply = get_keyword_reply(text)
         if reply:
             reply_type = "keyword"
@@ -125,7 +120,6 @@ def handle_comment(comment_data: dict):
                 reply_type = "fallback"
                 
         if reply:
-            # 🧠 Anti-Ban: Simulate human reading & typing time (2 to 7 seconds)
             time.sleep(random.uniform(2.0, 7.0))
             if reply_to_comment(comment_id, reply):
                 log_reply(comment_id, from_id, reply, media_id, "comment")
@@ -175,8 +169,48 @@ def handle_dm(dm_data: dict):
         if is_in_human_handoff(sender_id): return
         
         save_dm_memory(sender_id, "user", message_text)
-        use_ai = is_gemini_enabled() and not is_safe_mode()
         
+        # 🔥 Feature: Auto Lead Extractor (Alerts Telegram immediately)
+        phone_match = re.search(r'\b\d{10}\b|\b\d{3}[-.\s]??\d{3}[-.\s]??\d{4}\b', message_text)
+        email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', message_text)
+        
+        if phone_match or email_match:
+            lead_info = []
+            if phone_match: lead_info.append(f"📞 Phone: <code>{phone_match.group()}</code>")
+            if email_match: lead_info.append(f"📧 Email: <code>{email_match.group()}</code>")
+            try:
+                from telegram_bot import _send
+                lead_msg = (
+                    f"🎯 <b>✨ New Hot Lead Captured! ✨</b>\n\n"
+                    f"👤 <b>User ID:</b> <code>{sender_id}</code>\n"
+                    f"📝 <b>Details:</b>\n" + "\n".join(lead_info) + "\n"
+                    f"💬 <b>Msg:</b> <i>{message_text[:150]}</i>"
+                )
+                _send(SETTINGS.telegram_chat_id, lead_msg)
+                logger.info(f"🚀 Lead routed to Telegram channel from {sender_id}")
+            except Exception as le:
+                logger.error(f"Lead alert forward failed: {le}")
+
+        # 💖 Feature: Story Reaction / Single Emoji Quota Saver (Saves Gemini Calls)
+        clean_msg = message_text.strip()
+        if clean_msg in ["❤️", "🔥", "🙌", "👏", "😍", "😂", "✨"]:
+            emoji_responses = {
+                "❤️": "Thank you so much for the love! 🌸✨",
+                "🔥": "Glad you felt the energy! 🔥🙏",
+                "🙌": "Radhe Radhe! 🙏✨",
+                "👏": "Shukriya! Glad you liked it 😊💛",
+                "😍": "So sweet of you! Stay blessed 🌟",
+                "😂": "Haha glad it brought a smile! 😄✨",
+                "✨": "May your life shine bright! 🌸💫"
+            }
+            quick_reply = emoji_responses.get(clean_msg, "Thank you so much! ✨")
+            time.sleep(random.uniform(2.0, 5.0))
+            if send_dm(sender_id, quick_reply):
+                log_reply(message_id, sender_id, quick_reply, source="emoji_reaction")
+                save_dm_memory(sender_id, "bot", quick_reply)
+                return
+
+        use_ai = is_gemini_enabled() and not is_safe_mode()
         reply = get_keyword_reply(message_text)
         reply_type = "keyword"
         
@@ -197,7 +231,6 @@ def handle_dm(dm_data: dict):
             reply = random.choice(AESTHETIC_REPLIES)
             reply_type = "fallback"
             
-        # 🧠 Anti-Ban: DMs take slightly longer to type (4 to 10 seconds)
         time.sleep(random.uniform(4.0, 10.0))
         if send_dm(sender_id, reply):
             log_reply(message_id, sender_id, reply, source="dm")
