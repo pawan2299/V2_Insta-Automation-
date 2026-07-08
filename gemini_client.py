@@ -74,7 +74,7 @@ def _trim_incomplete_sentence(text: str) -> str:
     """Agar reply beech mein kat gaya ho, toh aakhri adhoore vaakya ko hata dega."""
     if not text:
         return text
-    enders = ['.', '!', '?', '।', '😊', '🙏', '✨', '🌸', '😄', '💛', '👍', '🙈', '❤️', '🔥']
+    enders = ['😊', '🙏', '🦚', '🌺', '❣️', '💛', '😍', '❤️', '🔥']
     if text[-1] in enders:
         return text
     positions = [text.rfind(e) for e in enders if text.rfind(e) != -1]
