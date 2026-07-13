@@ -13,7 +13,7 @@ from database import (
 from gemini_client import (
     generate_reply, can_use_gemini, generate_dm_reply,
     is_spam_or_negative, _gemini_should_reply_dm, classify_comment_intent,
-    generate_story_thank_you, summarize_conversation
+    generate_story_thank_you, summarize_conversation, generate_escalation_ack
 )
 from instagram_api import reply_to_comment, send_dm, get_media_details
 
@@ -35,7 +35,14 @@ EMOJI_REPLIES = [
     "🙏🏻✨", "Thank you! 🥺💛", "😄❤️", "🙈❤️", "😊🌸", "🔥🔥",
     "Radhe Radhe 🌸", "Hare Krishna ✨", "😄👍", "💛💛",
 ]
-ESCALATION_ACK_DM = "Hi there! 👋 I've passed your message to the admin. They'll get back to you soon! ✨"
+# ✅ FIX: AI now generates a language-matched escalation ack (see generate_escalation_ack).
+# These are only used if that AI call itself fails - a small pool spanning English and Hindi/Hinglish
+# so the fallback doesn't jarringly switch language mid-conversation.
+ESCALATION_ACK_FALLBACKS = [
+    "Hi there! 👋 I've passed your message to the admin. They'll get back to you soon! ✨",
+    "Aapka message admin tak pahucha diya hai, jaldi hi reply milega! 🙏",
+    "Noted! Isko team tak forward kar diya hai, thodi der mein baat hogi 😊",
+]
 
 # ✅ FIX: Story-mention thank-you ke liye bhi ab ek chhota diverse pool -
 # pehle yeh hamesha ek hi hardcoded "Radhe Radhe" line thi jab AI fail hota tha.
@@ -148,7 +155,9 @@ def _notify_human_dm(sender_id: str, message_text: str):
 def handle_dm(dm_data: dict):
     start_time = time.time()
     try:
-        if is_bot_paused(): return
+        # ✅ FIX: sleep-hours (/setsleep) was only checked for comments, never for DMs -
+        # this is why DMs kept replying through the night even with silent hours set.
+        if is_bot_paused() or not is_active_hours(): return
         if dm_data.get("message", {}).get("is_echo", False): return
         
         sender_id = str(dm_data.get("sender", {}).get("id", ""))
@@ -184,9 +193,10 @@ def handle_dm(dm_data: dict):
             should_reply = _gemini_should_reply_dm(message_text, sender_id)
             if not should_reply:
                 logger.info(f"🚨 DM Escalated (needs human): {message_text[:50]}...")
-                if send_dm(sender_id, ESCALATION_ACK_DM):
-                    log_reply(f"ack_{message_id}", sender_id, ESCALATION_ACK_DM, source="dm_ack")
-                    save_dm_memory(sender_id, "bot", ESCALATION_ACK_DM)
+                ack = generate_escalation_ack(message_text, sender_id) or random.choice(ESCALATION_ACK_FALLBACKS)
+                if send_dm(sender_id, ack):
+                    log_reply(f"ack_{message_id}", sender_id, ack, source="dm_ack")
+                    save_dm_memory(sender_id, "bot", ack)
                     set_human_handoff(sender_id, 24)
                     _notify_human_dm(sender_id, message_text)
                 return
@@ -224,3 +234,5 @@ def check_and_summarize_memory(user_id: str):
                 logger.info(f"🧠 ✅ Memory Summarized for {user_id}")
     except Exception as e:
         logger.error(f"❌ Summarization failed for {user_id}: {e}")
+
+
