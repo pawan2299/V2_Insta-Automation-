@@ -126,7 +126,14 @@ def send_status_update(chat_id: str, msg_id: int = None):
     state_str = "🟢 RUNNING"
     if stats['bot_paused']: state_str = "⏸ PAUSED"
     elif stats['safe_mode']: state_str = "🛡️ SAFE MODE"
-        
+
+    # ✅ FIX: Sleep-hours were set via /setsleep but never visible anywhere,
+    # making it impossible to verify if they were actually applied.
+    sleep_start = db.get_config("sleep_start") or "1"
+    sleep_end = db.get_config("sleep_end") or "6"
+    currently_active = db.is_active_hours()
+    sleep_status = "🟢 Awake (replying now)" if currently_active else "😴 Sleeping (silent hours)"
+
     from instagram_api import get_token_expiry_days
     ig_days = get_token_expiry_days("ig_user")
     page_days = get_token_expiry_days("page_access")
@@ -134,6 +141,7 @@ def send_status_update(chat_id: str, msg_id: int = None):
     page_str = f"{page_days} days" if page_days and page_days > 0 else ("Never" if page_days == -1 else "❌ Invalid")
     
     text = f"📊 <b>Bot Status:</b> {state_str}\n🤖 <b>Gemini:</b> {'🟢 ON' if stats['gemini_enabled'] else '⚪ OFF'}\n"
+    text += f"🌙 <b>Sleep Hours:</b> {sleep_start}:00 - {sleep_end}:00 IST ({sleep_status})\n"
     text += f"🚨 <b>Circuit Breaker:</b> {'ACTIVE' if stats['circuit_breaker_active'] else '🟢 OK'}\n"
     text += f"🔑 <b>IG Token Expiry:</b> {ig_str}\n"
     text += f"🔑 <b>Page Token Expiry:</b> {page_str}\n"
@@ -323,3 +331,4 @@ def show_c2dm_list(chat_id: str, msg_id: int = None):
     text = "📋 <b>Triggers:</b>\n" + "\n".join([f"• {t['keyword']}" for t in triggers]) if triggers else "No triggers."
     if msg_id: _edit_message(chat_id, msg_id, text, reply_markup={"inline_keyboard": btns})
     else: _send(chat_id, text, reply_markup={"inline_keyboard": btns})
+
