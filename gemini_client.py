@@ -183,7 +183,11 @@ def generate_reply(comment_text: str, post_caption: str = "", image_url: str | N
         "- Devotional words (Radhe Radhe, Hare Krishna etc.) ONLY if the comment itself is genuinely devotional/spiritual "
         "in tone. Never force them into casual comments.\n"
         "- NEVER ask people to follow.\n"
-        "- Match the user's language (Hindi/English/Hinglish).\n"
+        "- Match the user's language and script exactly - whatever language they wrote in (Hindi, English, "
+        "Hinglish, or any other language like Tamil, Bengali, Marathi, Spanish, etc.). Reply naturally in "
+        "that same language, don't default to Hindi or English.\n"
+        "- If someone genuinely and directly asks whether you are AI, a bot, or an app, answer honestly and "
+        "briefly - a light, casual admission is fine, but NEVER deny it or dodge the question.\n"
         "- Do NOT use markdown formatting like **bold**.\n"
         "Output ONLY the exact reply text. No prefixes, no quotes.\n"
         f"{history_context}{visual_instr}{context}\n"
@@ -217,7 +221,13 @@ def generate_dm_reply(message_text: str, user_id: str) -> str | None:
         "professional (business, collab, serious question), reply politely and professionally - no jokes, no slang.\n"
         "- Devotional words (Radhe Radhe, Hare Krishna etc.) ONLY if the person's message is genuinely "
         "devotional/spiritual in tone. Never force them.\n"
-        "- NEVER sound like a chatbot. NEVER mention AI unless directly asked.\n"
+        "- Don't volunteer that you're AI unprompted. But if someone genuinely and directly asks whether "
+        "you are AI, a bot, or an app, answer honestly and briefly - a light, casual admission is fine, "
+        "but NEVER deny it or dodge the question. Denying it when sincerely asked is dishonest and not allowed.\n"
+        "- Don't make up or confidently answer personal questions about the page owner's life, other jobs, "
+        "or activities unrelated to this page - keep it brief and vague rather than inventing details.\n"
+        "- Match the user's language and script exactly - whatever language they wrote in (Hindi, English, "
+        "Hinglish, or any other language). Reply naturally in that same language.\n"
         "- Vary length naturally like real texting - don't always write the same length.\n"
         f"{summary_context}"
         f"Recent Messages:\n{history_str}\n"
@@ -226,6 +236,21 @@ def generate_dm_reply(message_text: str, user_id: str) -> str | None:
     result = _generate(prompt, max_length=300, task_type="dm")
     if not result: return None
     return _trim_incomplete_sentence(result.strip())  # ✅ FIX: safety-net agar phir bhi cut ho
+
+def generate_escalation_ack(message_text: str, user_id: str) -> str | None:
+    """Short 'passed to admin' message, matched to the language the user is writing in."""
+    if not can_use_gemini(): return None
+    history = get_dm_memory(user_id, 3)
+    history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in history]) if history else ""
+    prompt = (
+        "Write a very short (max 15 words), warm message telling the person their message has been "
+        "passed to the admin/team and they'll get a reply soon. "
+        "Match the language/script the person is writing in (Hindi, Hinglish, or English).\n"
+        f"Recent messages:\n{history_str}\nTheir message: {message_text}\nYour message:"
+    )
+    result = _generate(prompt, max_length=80, task_type="dm")
+    if not result: return None
+    return _trim_incomplete_sentence(result.strip())
 
 def generate_welcome_dm(username: str) -> str | None:
     if not can_use_gemini(): return None
@@ -267,7 +292,15 @@ def _gemini_should_reply_dm(text: str, user_id: str) -> bool:
     history = get_dm_memory(user_id, 5)
     history_str = "\n".join([f"{m['role']}: {m['message_text']}" for m in history]) if history else ""
     if history_str: history_str = f"\nContext:\n{history_str}\n"
-    prompt = (f"Classify DM:\nBOT_REPLY = greetings, praise, emojis, simple questions.\nHUMAN_REPLY = business, collabs, payments, complaints.\n{history_str}New Message: {text}\n")
+    prompt = (
+        "Classify DM:\n"
+        "BOT_REPLY = greetings, praise, emojis, simple questions clearly about the page's content.\n"
+        "HUMAN_REPLY = business, collabs, payments, complaints, OR ambiguous/personal questions about the "
+        "page owner (their job, other work, personal life) that the AI can't reliably answer, OR the "
+        "conversation shows the user re-asking the same thing in different words / seems confused or "
+        "frustrated after 2+ exchanges on the same topic.\n"
+        f"{history_str}New Message: {text}\n"
+    )
     schema = {"type": "OBJECT", "properties": {"action": {"type": "STRING", "enum": ["BOT_REPLY", "HUMAN_REPLY"]}}, "required": ["action"]}
     result = _generate(prompt, max_length=50, task_type="dm_filter", response_schema=schema)
     if not result: return False
@@ -312,3 +345,5 @@ def summarize_conversation(user_id: str, messages: list[dict]) -> str | None:
         f"Conversation:\n{history_str}\nSummary:"
     )
     return _generate(prompt, max_length=200, task_type="summary")
+
+
