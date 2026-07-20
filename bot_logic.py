@@ -181,8 +181,16 @@ def handle_dm(dm_data: dict):
                 return
                 
         if not message_text: return
-        if is_in_human_handoff(sender_id): return
-        
+
+        # ✅ FIX: previously, messages sent during an active human-handoff window
+        # were dropped BEFORE save_dm_memory() ran - so when you later opened the
+        # DM manually on Instagram, conversation_memory had a gap for exactly the
+        # period the user needed you most. We still don't auto-reply (handoff
+        # means a human should respond), but we now keep the message on record.
+        if is_in_human_handoff(sender_id):
+            save_dm_memory(sender_id, "user", message_text)
+            return
+
         save_dm_memory(sender_id, "user", message_text)
         use_ai = is_gemini_enabled() and not is_safe_mode()
         
@@ -234,5 +242,7 @@ def check_and_summarize_memory(user_id: str):
                 logger.info(f"🧠 ✅ Memory Summarized for {user_id}")
     except Exception as e:
         logger.error(f"❌ Summarization failed for {user_id}: {e}")
+
+
 
 
