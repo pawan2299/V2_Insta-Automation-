@@ -14,7 +14,7 @@ from telegram_bot import handle_update, register_telegram_webhook
 from database import (
     init_db, get_stats, get_and_lock_failed_webhooks, 
     is_bot_paused, set_config, get_model_rpd, get_recent_activity,
-    get_top_posts
+    get_top_posts, start_daily_maintenance, db_health_check
 )
 import gemini_client
 
@@ -46,8 +46,13 @@ def initialize_app():
         try:
             init_db()
             register_telegram_webhook()
+            # ✅ NEW: wires up cleanup_old_data() + check_and_send_token_expiry_alert(),
+            # both of which existed in the code already but were never called from
+            # anywhere. Runs in its own daemon thread, independent of webhook
+            # processing - doesn't touch the threading model at all.
+            start_daily_maintenance(interval_hours=24)
             app._db_initialized = True
-            logger.info("🚀 Database and Telegram Webhook initialized.")
+            logger.info("🚀 Database, Telegram Webhook, and Daily Maintenance initialized.")
         except Exception as e:
             logger.error(f"❌ Initialization failed: {e}")
 
@@ -58,7 +63,13 @@ def dashboard():
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    return "OK", 200
+    # ✅ FIX: previously always returned "OK" even if the DB pool was completely
+    # dead - Render's health check couldn't detect a real outage. Now it does a
+    # real SELECT 1 through the pool. This only touches this one route; it does
+    # not add any new threading and can't cause the earlier lockup.
+    if db_health_check():
+        return "OK", 200
+    return "DB unavailable", 503
 
 @app.route("/webhook", methods=["GET", "POST"])
 def instagram_webhook():
