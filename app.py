@@ -14,7 +14,8 @@ from telegram_bot import handle_update, register_telegram_webhook
 from database import (
     init_db, get_stats, get_and_lock_failed_webhooks, 
     is_bot_paused, set_config, get_model_rpd, get_recent_activity,
-    get_top_posts, start_daily_maintenance, db_health_check
+    get_top_posts, start_daily_maintenance, db_health_check,
+    start_pending_reply_scheduler
 )
 import gemini_client
 
@@ -51,8 +52,13 @@ def initialize_app():
             # anywhere. Runs in its own daemon thread, independent of webhook
             # processing - doesn't touch the threading model at all.
             start_daily_maintenance(interval_hours=24)
+            # ✅ NEW (Part A): humanised delayed/batched reply queue. Polls
+            # pending_replies every 15s and sends replies whose delay has elapsed.
+            # Also its own independent daemon thread - webhook threads now only
+            # enqueue, they never call Gemini or send replies directly anymore.
+            start_pending_reply_scheduler(poll_seconds=15)
             app._db_initialized = True
-            logger.info("🚀 Database, Telegram Webhook, and Daily Maintenance initialized.")
+            logger.info("🚀 Database, Telegram Webhook, Daily Maintenance, and Pending-Reply Scheduler initialized.")
         except Exception as e:
             logger.error(f"❌ Initialization failed: {e}")
 
