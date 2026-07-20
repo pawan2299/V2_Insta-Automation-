@@ -20,9 +20,20 @@ logger = logging.getLogger(__name__)
 
 _clients: list[genai.Client] = []
 
+# ✅ FIX: generate_content() previously had no request timeout at all - a single
+# hung call (rare, but happens on free-tier network hiccups) would block that
+# thread forever. Not catastrophic with unbounded per-webhook threads (just one
+# leaked thread), but still a real leak, and would be catastrophic again if a
+# bounded worker pool is ever reintroduced. 20s is generous for a text/DM reply
+# while still guaranteeing every call eventually returns or raises.
+_GEMINI_TIMEOUT_MS = 20_000
+
 def _init_clients():
     global _clients
-    _clients = [genai.Client(api_key=k) for k in SETTINGS.gemini_api_keys if k]
+    _clients = [
+        genai.Client(api_key=k, http_options=types.HttpOptions(timeout=_GEMINI_TIMEOUT_MS))
+        for k in SETTINGS.gemini_api_keys if k
+    ]
 
 _init_clients()
 
@@ -345,5 +356,7 @@ def summarize_conversation(user_id: str, messages: list[dict]) -> str | None:
         f"Conversation:\n{history_str}\nSummary:"
     )
     return _generate(prompt, max_length=200, task_type="summary")
+
+
 
 
