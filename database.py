@@ -135,6 +135,135 @@ def db_health_check() -> bool:
         logger.error(f"DB health check failed: {e}")
         return False
 
+
+# ============================================================================
+# ✅ NEW (Part A): Delayed/batched reply queue.
+# handle_comment()/handle_dm() no longer reply instantly - they enqueue here.
+# A background thread (start_pending_reply_scheduler) picks up due batches and
+# hands them to bot_logic.process_pending_batch() for the actual AI call + send.
+# ============================================================================
+
+def enqueue_pending_reply(user_id: str, source: str, media_id: str | None,
+                           event_id: str, text: str,
+                           candidate_scheduled_at: datetime, ceiling_seconds: int):
+    """
+    Adds one message to a user's pending batch. If a pending (not yet processing)
+    batch already exists for this exact (user_id, source, media_id), the new
+    message is appended to it and scheduled_at is pushed to the new candidate
+    time - but never past first_message_at + ceiling_seconds, so a user who
+    keeps sending messages can't push the reply back forever.
+
+    Row is locked with FOR UPDATE for the duration of this call so two webhook
+    threads racing to enqueue for the same user can't both create separate rows
+    or step on each other's update.
+    """
+    now = datetime.now(timezone.utc)
+    with get_db() as cur:
+        cur.execute("""
+            SELECT id, messages, first_message_at FROM pending_replies
+            WHERE user_id = %s AND source = %s AND COALESCE(media_id, '') = COALESCE(%s, '')
+              AND status = 'pending'
+            FOR UPDATE
+        """, (user_id, source, media_id))
+        row = cur.fetchone()
+
+        if row:
+            messages = row["messages"] if isinstance(row["messages"], list) else json.loads(row["messages"])
+            messages.append({"event_id": event_id, "text": text, "at": now.isoformat()})
+            ceiling = row["first_message_at"] + timedelta(seconds=ceiling_seconds)
+            scheduled = min(candidate_scheduled_at, ceiling)
+            cur.execute(
+                "UPDATE pending_replies SET messages = %s, scheduled_at = %s WHERE id = %s",
+                (json.dumps(messages), scheduled, row["id"])
+            )
+        else:
+            messages = [{"event_id": event_id, "text": text, "at": now.isoformat()}]
+            cur.execute("""
+                INSERT INTO pending_replies
+                    (user_id, source, media_id, messages, first_message_at, scheduled_at, status)
+                VALUES (%s, %s, %s, %s, %s, %s, 'pending')
+            """, (user_id, source, media_id, json.dumps(messages), now, candidate_scheduled_at))
+
+
+def get_due_batches(limit: int = 20) -> list[dict]:
+    """Atomically claims (status -> 'processing') and returns batches whose time has come."""
+    with get_db() as cur:
+        cur.execute("""
+            UPDATE pending_replies SET status = 'processing'
+            WHERE id IN (
+                SELECT id FROM pending_replies
+                WHERE status = 'pending' AND scheduled_at <= NOW()
+                ORDER BY scheduled_at ASC LIMIT %s
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING *
+        """, (limit,))
+        return cur.fetchall()
+
+
+def delete_pending_batch(batch_id: int):
+    with get_db() as cur:
+        cur.execute("DELETE FROM pending_replies WHERE id = %s", (batch_id,))
+
+
+def requeue_pending_batch(batch_id: int):
+    """Puts a batch back to 'pending' (e.g. after process_pending_batch() raised)."""
+    with get_db() as cur:
+        cur.execute("UPDATE pending_replies SET status = 'pending' WHERE id = %s", (batch_id,))
+
+
+def requeue_stuck_batches(older_than_minutes: int = 10):
+    """
+    Safety net: if a batch got stuck in 'processing' (e.g. the process died mid-way
+    instead of raising cleanly), free it back to 'pending' so it isn't lost forever.
+    """
+    with get_db() as cur:
+        cur.execute("""
+            UPDATE pending_replies SET status = 'pending'
+            WHERE status = 'processing' AND scheduled_at < NOW() - make_interval(mins => %s)
+        """, (older_than_minutes,))
+
+
+_pending_reply_thread_started = False
+
+def start_pending_reply_scheduler(poll_seconds: int = 15):
+    """
+    Standalone daemon thread, independent of the webhook threading model - it only
+    reads/writes the pending_replies table and calls bot_logic.process_pending_batch().
+    Does not touch app.py's per-webhook threads at all, so it carries none of the
+    risk that caused the earlier ThreadPoolExecutor outage.
+    """
+    global _pending_reply_thread_started
+    if _pending_reply_thread_started:
+        return
+    _pending_reply_thread_started = True
+
+    def _loop():
+        # Deferred import - avoids a circular import at module load time
+        # (bot_logic imports from database at the top of its file).
+        from bot_logic import process_pending_batch
+        while True:
+            try:
+                requeue_stuck_batches()
+                batches = get_due_batches(limit=20)
+                for batch in batches:
+                    try:
+                        process_pending_batch(batch)
+                    except Exception as e:
+                        logger.error(f"❌ process_pending_batch failed for id={batch.get('id')}: {e}")
+                        try:
+                            requeue_pending_batch(batch["id"])
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.error(f"❌ pending_reply_scheduler loop failed: {e}")
+            time.sleep(poll_seconds)
+
+    t = threading.Thread(target=_loop, daemon=True, name="pending-reply-scheduler")
+    t.start()
+    logger.info(f"⏳ Pending-reply scheduler started (poll every {poll_seconds}s).")
+
+
 def init_db():
     init_pool()
     with get_db() as cur:
@@ -151,12 +280,29 @@ def init_db():
         cur.execute("""CREATE TABLE IF NOT EXISTS conversation_summaries (user_id TEXT PRIMARY KEY, summary TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())""")
         cur.execute("""CREATE TABLE IF NOT EXISTS c2dm_cooldowns (user_id TEXT NOT NULL, keyword TEXT NOT NULL, sent_at TIMESTAMPTZ DEFAULT NOW(), PRIMARY KEY (user_id, keyword))""")
         cur.execute("""CREATE TABLE IF NOT EXISTS reply_feedback (id SERIAL PRIMARY KEY, reply_log_id INTEGER UNIQUE REFERENCES reply_logs(id) ON DELETE CASCADE, feedback TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW())""")
-        
+        # ✅ NEW (Part A - humanised delayed/batched replies): holds messages that
+        # arrived but haven't been replied to yet. Multiple messages from the same
+        # user (same source+media_id) accumulate here under one row until
+        # scheduled_at, then the whole batch is replied to together in one AI call.
+        cur.execute("""CREATE TABLE IF NOT EXISTS pending_replies (
+            id SERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            media_id TEXT,
+            messages JSONB NOT NULL,
+            first_message_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            scheduled_at TIMESTAMPTZ NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+
         cur.execute("""INSERT INTO system_config (key, value) VALUES ('bot_paused', 'false'), ('gemini_enabled', 'true'), ('safe_mode', 'false'), ('consecutive_429s', '0'), ('circuit_breaker_until', '0'), ('c2dm_enabled', 'true') ON CONFLICT DO NOTHING""")
         
         cur.execute("CREATE INDEX IF NOT EXISTS idx_reply_logs_created ON reply_logs(created_at DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_reply_logs_media ON reply_logs(media_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_conv_mem_user ON conversation_memory(user_id, created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pending_replies_due ON pending_replies(status, scheduled_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pending_replies_lookup ON pending_replies(user_id, source, media_id, status)")
         logger.info("🚀 Enterprise DB initialized.")
 
 def claim_event(event_id: str) -> bool:
