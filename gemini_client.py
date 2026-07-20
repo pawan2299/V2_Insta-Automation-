@@ -24,9 +24,15 @@ _clients: list[genai.Client] = []
 # hung call (rare, but happens on free-tier network hiccups) would block that
 # thread forever. Not catastrophic with unbounded per-webhook threads (just one
 # leaked thread), but still a real leak, and would be catastrophic again if a
-# bounded worker pool is ever reintroduced. 20s is generous for a text/DM reply
-# while still guaranteeing every call eventually returns or raises.
-_GEMINI_TIMEOUT_MS = 20_000
+# bounded worker pool is ever reintroduced.
+#
+# ✅ TUNED (was 20s): production logs showed gemini-3.5-flash genuinely taking
+# 14-19s to respond under normal load. A 20s cap was cutting Key 0 off right
+# before it would have succeeded, wasting a full 20s before falling through to
+# Key 1's retry - inflating total DM latency to ~37-42s. 30s gives real slow
+# responses room to complete on the first key, while still guaranteeing no
+# call can hang forever.
+_GEMINI_TIMEOUT_MS = 30_000
 
 def _init_clients():
     global _clients
