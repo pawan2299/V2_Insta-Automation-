@@ -25,11 +25,15 @@ def init_pool(force: bool = False):
             except Exception: pass
             _pool = None
         try:
+            # ✅ UPGRADE: maxconn 6 -> 15. Threads are unbounded (one per webhook),
+            # so a burst of comments/DMs could previously exhaust a 6-connection
+            # pool and lose replies outright (getconn() had no retry either).
+            # Neon free tier comfortably supports this many pooled connections.
             _pool = pool.ThreadedConnectionPool(
-                minconn=1, maxconn=6, dsn=SETTINGS.database_url,
+                minconn=1, maxconn=15, dsn=SETTINGS.database_url,
                 cursor_factory=RealDictCursor, connect_timeout=20,
             )
-            logger.info("DB pool initialized (maxconn=6).")
+            logger.info("DB pool initialized (maxconn=15).")
         except Exception as e:
             logger.error(f"Failed to initialize DB pool: {e}")
             _pool = None
@@ -43,8 +47,26 @@ def get_db():
         if _pool is None or getattr(_pool, 'closed', False):
             logger.warning("DB pool closed. Reinitializing...")
             init_pool(force=True)
-        
-        conn = _pool.getconn()
+
+        # ✅ UPGRADE: getconn() previously had no error handling at all - if the
+        # pool was momentarily exhausted (burst of concurrent webhook threads),
+        # this raised psycopg2.pool.PoolError straight up and the reply for that
+        # specific event was lost. Now we retry a few times with a short backoff
+        # before giving up, which absorbs short bursts without touching the
+        # threading model that caused the last outage.
+        conn = None
+        last_err = None
+        for attempt in range(3):
+            try:
+                conn = _pool.getconn()
+                break
+            except pool.PoolError as e:
+                last_err = e
+                logger.warning(f"DB pool exhausted (attempt {attempt + 1}/3), retrying shortly...")
+                time.sleep(0.5 * (attempt + 1))
+        if conn is None:
+            raise last_err or pool.PoolError("DB pool exhausted after retries")
+
         try:
             with conn.cursor() as test_cur: test_cur.execute("SELECT 1")
         except (psycopg2.OperationalError, psycopg2.InterfaceError):
@@ -66,6 +88,52 @@ def get_db():
         if conn:
             try: _pool.putconn(conn)
             except Exception: pass
+
+
+# ✅ NEW: daily maintenance scheduler. cleanup_old_data() already existed but was
+# never called anywhere, so processed_events/reply_logs/conversation_memory/
+# failed_webhooks etc. grew forever with no expiry - a slow storage-exhaustion
+# risk on Neon's free tier. check_and_send_token_expiry_alert() had the same
+# problem (defined, never wired). This is a standalone daemon thread with its
+# own try/except per task; it does not touch get_db()'s locking or the webhook
+# threading model at all, so it carries none of the risk that caused the
+# ThreadPoolExecutor outage.
+_maintenance_thread_started = False
+
+def start_daily_maintenance(interval_hours: int = 24):
+    global _maintenance_thread_started
+    if _maintenance_thread_started:
+        return
+    _maintenance_thread_started = True
+
+    def _loop():
+        while True:
+            try:
+                cleanup_old_data()
+                logger.info("🧹 cleanup_old_data() ran successfully.")
+            except Exception as e:
+                logger.error(f"❌ cleanup_old_data() failed: {e}")
+            try:
+                from telegram_bot import check_and_send_token_expiry_alert
+                check_and_send_token_expiry_alert()
+            except Exception as e:
+                logger.error(f"❌ check_and_send_token_expiry_alert() failed: {e}")
+            time.sleep(interval_hours * 3600)
+
+    t = threading.Thread(target=_loop, daemon=True, name="daily-maintenance")
+    t.start()
+    logger.info(f"🧹 Daily maintenance scheduler started (every {interval_hours}h).")
+
+
+def db_health_check() -> bool:
+    """Lightweight check used by /health - returns True only if a real query succeeds."""
+    try:
+        with get_db() as cur:
+            cur.execute("SELECT 1")
+        return True
+    except Exception as e:
+        logger.error(f"DB health check failed: {e}")
+        return False
 
 def init_db():
     init_pool()
@@ -365,3 +433,4 @@ def get_top_posts(limit: int = 5) -> list:
         GROUP BY media_id ORDER BY reply_count DESC LIMIT %s
         """, (limit,))
         return cur.fetchall()
+
