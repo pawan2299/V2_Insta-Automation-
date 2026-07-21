@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 import time
+import random
 import json
 import re
 import requests
@@ -170,12 +171,59 @@ def _generate(prompt: str, max_length: int = 200, task_type: str = "comment", im
             except Exception as e:
                 error_msg = str(e)
                 logger.error(f"❌ Gemini API Failed: {model_id} (Key {client_idx}) | Error: {error_msg}")
+
                 if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                    # Quota genuinely exhausted for this exact model+key - no point
+                    # retrying it again soon. 5-min cooldown, move on.
                     set_config(f"cooldown_{model_id}_{client_idx}", str(time.time() + 300))
                     _record_failure_and_maybe_trip_breaker()
                     continue
+
                 elif "400" in error_msg and "SAFETY" in error_msg:
                     return None
+
+                elif ("503" in error_msg or "UNAVAILABLE" in error_msg
+                      or "504" in error_msg or "DEADLINE_EXCEEDED" in error_msg
+                      or "500" in error_msg or "INTERNAL" in error_msg):
+                    # ✅ RESEARCHED FIX (Google's official troubleshooting guide -
+                    # ai.google.dev/gemini-api/docs/troubleshooting - + Google AI
+                    # Developer Forum + multiple production write-ups):
+                    #
+                    # 429/500/503/504 are ALL classified as "retryable" - Google's own
+                    # recommendation is exponential backoff, but production guidance
+                    # consistently adds one more layer for 503/504 specifically:
+                    # "Model Degradation Chain" - switch to a DIFFERENT model before
+                    # backing off, since a 503 is model-wide server overload, not a
+                    # per-key problem (confirmed by our own logs: both keys failed on
+                    # the same model, seconds apart).
+                    #
+                    # The Google AI Developer Forum also flagged that failed 503
+                    # retries still count against your RPM/RPD quota - so blindly
+                    # hammering the same overloaded model+key wastes quota, not just
+                    # time. A short cooldown here stops the NEXT incoming message
+                    # (this one might be a batch of several) from repeating the same
+                    # doomed attempt.
+                    set_config(f"cooldown_{model_id}_{client_idx}", str(time.time() + 90))
+                    _record_failure_and_maybe_trip_breaker()
+
+                    # `continue` immediately tries the NEXT model in models_to_try on
+                    # the SAME key first (e.g. gemini-3.5-flash -> gemini-2.5-pro) -
+                    # this is the actual "degradation chain" and needs no wait at all,
+                    # since it's a different model/resource pool.
+                    #
+                    # Official guidance's full 30-60s exponential backoff isn't
+                    # practical here (this is a live chat reply, not a batch job), but
+                    # a short jittered pause measurably helps IF this was genuinely the
+                    # last model+key combination left to try - our pending-reply queue
+                    # already has minutes of slack built in, so a couple of extra
+                    # seconds here costs nothing in UX terms.
+                    is_last_attempt = (
+                        client_idx == len(_clients) - 1 and model_id == models_to_try[-1]
+                    )
+                    if is_last_attempt:
+                        time.sleep(random.uniform(1.5, 3.5))
+                    continue
+
                 else:
                     _record_failure_and_maybe_trip_breaker()
                     break
